@@ -1,0 +1,8 @@
+terraform-drift-report
+Copyright 2026 Terraform State Manager Contributors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+Bundles terraform-drift-contract (Apache-2.0) and @actions/core (MIT) into
+dist/index.js via @vercel/ncc.

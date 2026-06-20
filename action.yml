@@ -1,0 +1,59 @@
+name: Terraform drift report
+description: >-
+  Parse a Terraform or OpenTofu plan JSON (terraform/tofu show -json) into drift
+  counts and a changed-resource summary, emit them as outputs and a JSON
+  artifact, and optionally POST the result to a Terraform State Manager (TSM)
+  drift callback. Consume-only — it does not run plan.
+author: sethbacon
+branding:
+  icon: activity
+  color: purple
+
+inputs:
+  plan-json-file:
+    description: Path to the plan JSON (output of `terraform show -json` / `tofu show -json`).
+    required: true
+  module-manifest:
+    description: Path to the resolved module lockfile for locked versions.
+    required: false
+    default: .terraform/modules/modules.json
+  include-module-provenance:
+    description: Include module_calls (+ module_locks) in the report/callback.
+    required: false
+    default: "true"
+  fail-on-drift:
+    description: Fail the step when drift is detected.
+    required: false
+    default: "false"
+  detail:
+    description: Free-text run label forwarded as the callback `detail` field.
+    required: false
+    default: ""
+  callback-url:
+    description: TSM drift callback URL. POST happens only if url and token are both set.
+    required: false
+    default: ""
+  callback-token:
+    description: Per-run one-shot TSM callback token (sent as X-TSM-Callback-Token).
+    required: false
+    default: ""
+  reject-unauthorized:
+    description: Verify TLS on the callback (set false only for a private-CA endpoint).
+    required: false
+    default: "true"
+
+outputs:
+  drifted:
+    description: '"true" when any non-no-op, non-read change was planned.'
+  added:
+    description: Count of resources whose plan contains a create.
+  changed:
+    description: Count of resources whose plan contains an update.
+  destroyed:
+    description: Count of resources whose plan contains a delete.
+  summary-file:
+    description: Path to the written JSON report (the exact callback body).
+
+runs:
+  using: node20
+  main: dist/index.js
