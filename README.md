@@ -1,5 +1,8 @@
 # drift-report
 
+[![GitHub release](https://img.shields.io/github/v/release/sethbacon/terraform-drift-report?logo=github&label=Marketplace&color=2ea44f)](https://github.com/marketplace/actions/terraform-drift-report)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 Parse a Terraform/OpenTofu plan JSON into Terraform State Manager (TSM) drift
 counts + a changed-resource summary, emit them as outputs and a JSON artifact,
 and optionally POST the result to a TSM drift callback. **Consume-only** — it
