@@ -1,9 +1,5 @@
 name: Terraform drift report
-description: >-
-  Parse a Terraform or OpenTofu plan JSON (terraform/tofu show -json) into drift
-  counts and a changed-resource summary, emit them as outputs and a JSON
-  artifact, and optionally POST the result to a Terraform State Manager (TSM)
-  drift callback. Consume-only — it does not run plan.
+description: Parse a Terraform/OpenTofu plan JSON into drift counts and a changed-resource summary; optionally POST to a TSM callback.
 author: sethbacon
 branding:
   icon: activity
