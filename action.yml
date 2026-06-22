@@ -51,5 +51,5 @@ outputs:
     description: Path to the written JSON report (the exact callback body).
 
 runs:
-  using: node20
+  using: node24
   main: dist/index.js
