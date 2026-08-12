@@ -10,8 +10,10 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@4cloudguru/pipeline-task-core": "0.2.0",
     "@actions/core": "^1.11.1",
-    "terraform-drift-contract": "github:sethbacon/terraform-drift-contract#v1.0.0"
+    "terraform-drift-contract": "github:sethbacon/terraform-drift-contract#v1.0.0",
+    "undici": "^6.28.0"
   },
   "overrides": {
     "undici": "^6.28.0"
