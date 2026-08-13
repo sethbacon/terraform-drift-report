@@ -11,7 +11,7 @@
     "test:dist": "node scripts/dist-behaviour.mjs"
   },
   "dependencies": {
-    "@4cloudguru/pipeline-task-core": "file:../pipeline-task-core/4cloudguru-pipeline-task-core-0.4.0.tgz",
+    "@4cloudguru/pipeline-task-core": "^0.4.0",
     "@4cloudguru/terraform-drift-contract": "^1.1.0",
     "@actions/core": "^1.11.1",
     "undici": "^6.28.0"
