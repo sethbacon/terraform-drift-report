@@ -3,23 +3,17 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { Plan, summarize, moduleCallsPlan } from '@4cloudguru/terraform-drift-contract'
-import { postJson } from './callback'
+import { describeError, postJson, resolveTlsTrust } from './callback'
 import { createHostAuthorizer } from './egress'
-
-/** Reads `.terraform/modules/modules.json` verbatim for the callback's
- *  module_locks field; returns null when absent or unreadable (the backend then
- *  records provenance without locked versions, exactly as the jq template does). */
-function readModuleLocks(manifestPath: string): unknown {
-  try {
-    if (!fs.existsSync(manifestPath)) return null
-    return JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
-  } catch {
-    return null
-  }
-}
+import { readModuleLocks } from './module-locks'
 
 async function run(): Promise<void> {
   try {
+    // Resolved before anything else, and whether or not a callback is
+    // configured, so that a `reject-unauthorized: false` left in a workflow is
+    // refused wherever it is set rather than silently ignored.
+    const tlsTrust = resolveTlsTrust(core.getInput('reject-unauthorized'), core.getInput('ca-cert'))
+
     const planFile = core.getInput('plan-json-file', { required: true })
     if (!fs.existsSync(planFile)) {
       throw new Error(
@@ -68,13 +62,12 @@ async function run(): Promise<void> {
     const callbackToken = core.getInput('callback-token')
     if (callbackUrl && callbackToken) {
       core.setSecret(callbackToken)
-      const rejectUnauthorized = core.getBooleanInput('reject-unauthorized')
       const resp = await postJson(
         callbackUrl,
         { 'X-TSM-Callback-Token': callbackToken },
         JSON.stringify(body),
-        rejectUnauthorized,
         createHostAuthorizer(core.getInput('callback-allowed-hosts')),
+        tlsTrust,
       )
       if (resp.status < 200 || resp.status >= 300) {
         throw new Error(`Drift callback failed (HTTP ${resp.status}): ${resp.body}`)
@@ -88,7 +81,7 @@ async function run(): Promise<void> {
       core.setFailed(`Drift detected: ${result.summary.length} changed resource(s).`)
     }
   } catch (error) {
-    core.setFailed(error instanceof Error ? error.message : String(error))
+    core.setFailed(describeError(error))
   }
 }
 

@@ -14,7 +14,12 @@ inputs:
     required: false
     default: .terraform/modules/modules.json
   include-module-provenance:
-    description: Include module_calls (+ module_locks) in the report/callback.
+    description: >-
+      Include module provenance in the report/callback. Both fields are
+      PROJECTIONS, never the raw documents: `module_calls` forwards only each
+      call's `source` and `version_constraint`, and `module_locks` only each
+      lock's `Key`, `Source` and `Version` — with credentials stripped from
+      every source address.
     required: false
     default: "true"
   fail-on-drift:
@@ -33,8 +38,19 @@ inputs:
     description: Per-run one-shot TSM callback token (sent as X-TSM-Callback-Token).
     required: false
     default: ""
+  ca-cert:
+    description: >-
+      PEM certificate(s) for the CA that issued the callback endpoint's TLS
+      certificate, for a TSM endpoint fronted by a private CA. Trusting the CA
+      keeps both certificate-chain and hostname verification on. When set, it
+      replaces the default trust store for the callback request.
+    required: false
+    default: ""
   reject-unauthorized:
-    description: Verify TLS on the callback (set false only for a private-CA endpoint).
+    description: >-
+      REMOVED as a switch. Setting it to false disabled certificate AND hostname
+      verification on the request carrying the per-run callback token, so a
+      false value now fails the step. Use `ca-cert` instead.
     required: false
     default: "true"
   callback-allowed-hosts:
