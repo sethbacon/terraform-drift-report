@@ -2,7 +2,7 @@ import * as core from '@actions/core'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { Plan, summarize, moduleCallsPlan } from 'terraform-drift-contract'
+import { Plan, summarize, moduleCallsPlan } from '@4cloudguru/terraform-drift-contract'
 import { postJson } from './callback'
 import { createHostAuthorizer } from './egress'
 
