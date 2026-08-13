@@ -5,12 +5,13 @@
   "description": "GitHub Action: parse Terraform/OpenTofu plan JSON into TSM drift counts + summary and optionally POST to the TSM callback.",
   "license": "Apache-2.0",
   "scripts": {
-    "build": "ncc build src/index.ts -o dist --minify --no-source-map-register",
+    "build": "ncc build src/index.ts -o dist --minify --no-source-map-register && ncc build src/cleanup.ts -o dist/cleanup-build --minify --no-source-map-register && mv dist/cleanup-build/index.js dist/cleanup.js && rm -rf dist/cleanup-build",
     "test": "vitest run",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:dist": "node scripts/dist-behaviour.mjs"
   },
   "dependencies": {
-    "@4cloudguru/pipeline-task-core": "0.2.0",
+    "@4cloudguru/pipeline-task-core": "^0.4.0",
     "@4cloudguru/terraform-drift-contract": "^1.1.0",
     "@actions/core": "^1.11.1",
     "undici": "^6.28.0"

@@ -21,10 +21,15 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm test
+      # Drives the REBUILT, MINIFIED bundle and observes what it does. --minify
+      # strips names, so nothing about dist/ can be proven by reading it.
+      - name: Behaviour of the built bundle
+        run: npm run test:dist
+
       - name: Rebuild bundle and fail if dist is stale
         run: |
           npm run build
-          if ! git diff --exit-code -- dist/index.js; then
+          if ! git diff --exit-code -- dist; then
             echo "::error::dist is out of date — run 'npm run build' and commit the result."
             exit 1
           fi

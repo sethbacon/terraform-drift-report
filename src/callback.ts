@@ -1,4 +1,4 @@
-import { METADATA_TIMEOUT_MS, createHttpClient } from '@4cloudguru/pipeline-task-core'
+import { HttpError, METADATA_TIMEOUT_MS, createHttpClient } from '@4cloudguru/pipeline-task-core'
 import { Agent } from 'undici'
 import { URL } from 'url'
 import type { AuthorizeHost } from './egress'
@@ -119,17 +119,30 @@ export function postJson(
     // host and an allowlist entry without one cannot silently match a redirect
     // to a different port. Awaited: an async rejection that is not awaited
     // cannot stop the in-flight request.
+    // The refusal is re-thrown NON-retryable. fetchStatusText retries, and the
+    // shared client classifies any non-HttpError as a transient transport
+    // failure — so a plain throw here would be REPEATED, giving a host that
+    // resolves differently per lookup several chances inside one run to flip
+    // from refused to allowed. The library's own downloadToFile wraps its
+    // authorizeHost refusal for exactly this reason.
     redirectPolicy: async (_originHost, next) => {
-      await authorizeHost(next.host)
+      try {
+        await authorizeHost(next.host)
+      } catch (error) {
+        throw new HttpError(error instanceof Error ? error.message : String(error), false)
+      }
       return true
     },
   })
 
   return (async () => {
+    // Outside the retrying accessor, so this refusal is already fatal.
     await authorizeHost(new URL(url).hostname)
-    return client.fetchWithTimeout(url, METADATA_TIMEOUT_MS, async (response) => ({
-      status: response.status,
-      body: await response.text(),
-    }))
+    // fetchStatusText, not a hand-rolled `consume`: a caller-supplied consume
+    // never reaches the shared client's readBounded, so maxResponseBytes did
+    // not apply to it and a hostile or wedged callback host could stream until
+    // the runner OOMed (measured 52 MB buffered against a 1 KB cap). This
+    // accessor returns the status alongside a BOUNDED body.
+    return client.fetchStatusText(url, METADATA_TIMEOUT_MS)
   })()
 }

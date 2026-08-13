@@ -66,8 +66,8 @@ jobs:
       - name: Fail if the committed dist is stale at the tag
         run: |
           npm run build
-          if ! git diff --exit-code -- dist/index.js; then
-            echo "::error::dist/index.js at this tag does not match a fresh build. Refusing to release a bundle that was never verified."
+          if ! git diff --exit-code -- dist; then
+            echo "::error::dist/ at this tag does not match a fresh build. Refusing to release a bundle that was never verified."
             exit 1
           fi
 

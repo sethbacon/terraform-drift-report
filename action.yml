@@ -79,3 +79,7 @@ outputs:
 runs:
   using: node24
   main: dist/index.js
+  # The report holds unredacted attribute values, so it is removed at job end
+  # rather than left on the runner. Best-effort: it never fails the job.
+  post: dist/cleanup.js
+  post-if: always()
