@@ -37,6 +37,16 @@ inputs:
     description: Verify TLS on the callback (set false only for a private-CA endpoint).
     required: false
     default: "true"
+  callback-allowed-hosts:
+    description: >-
+      Comma/newline-separated hosts the callback may be sent to, applied to the
+      initial URL and to every redirect hop. A `*.` prefix matches exactly one
+      label (`*.tsm.example.com`). When set, only these hosts are permitted —
+      which is how a deliberately-private, self-hosted TSM endpoint stays
+      reachable. When empty, any public host is permitted and private,
+      link-local or otherwise reserved destinations are refused.
+    required: false
+    default: ""
 
 outputs:
   drifted:

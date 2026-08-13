@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { Plan, summarize, moduleCallsPlan } from 'terraform-drift-contract'
 import { postJson } from './callback'
+import { createHostAuthorizer } from './egress'
 
 /** Reads `.terraform/modules/modules.json` verbatim for the callback's
  *  module_locks field; returns null when absent or unreadable (the backend then
@@ -73,6 +74,7 @@ async function run(): Promise<void> {
         { 'X-TSM-Callback-Token': callbackToken },
         JSON.stringify(body),
         rejectUnauthorized,
+        createHostAuthorizer(core.getInput('callback-allowed-hosts')),
       )
       if (resp.status < 200 || resp.status >= 300) {
         throw new Error(`Drift callback failed (HTTP ${resp.status}): ${resp.body}`)
