@@ -17,12 +17,13 @@ works) and your cloud's first-party OIDC auth action.
 |-------|---------|-------|
 | `plan-json-file` | — (required) | output of `terraform show -json` / `tofu show -json` |
 | `module-manifest` | `.terraform/modules/modules.json` | resolved module lockfile for locked versions |
-| `include-module-provenance` | `true` | include `module_calls` (+ `module_locks`) in the report |
+| `include-module-provenance` | `true` | include projected `module_calls` (+ `module_locks`) in the report (see [Module provenance](#module-provenance)) |
 | `fail-on-drift` | `false` | fail the step when drift is detected |
 | `detail` | `""` | free-text run label forwarded as the callback `detail` |
 | `callback-url` | `""` | TSM callback URL; POST happens only with both url + token |
 | `callback-token` | `""` | per-run one-shot token (sent as `X-TSM-Callback-Token`) |
-| `reject-unauthorized` | `true` | TLS verification for the callback |
+| `ca-cert` | `""` | PEM CA certificate for a callback endpoint behind a private CA (see [Private CAs](#private-cas)) |
+| `reject-unauthorized` | `true` | **a false value now fails the step** (see [Private CAs](#private-cas)) |
 | `callback-allowed-hosts` | `""` | hosts the callback may be sent to (see [Callback egress](#callback-egress)) |
 
 ## Outputs
@@ -72,6 +73,71 @@ works under a `tsm.example.com` pin; a *redirect* onto a non-default port is
 refused, so a pin cannot be widened to another port on the same host.
 
 Only `https://` URLs are accepted, and the callback is bounded by a 60s timeout.
+
+## Private CAs
+
+The callback carries the per-run `callback-token` as a bearer credential, plus
+the full plan report, so the peer is always authenticated: both the certificate
+chain **and** the hostname are verified, and there is no switch to turn that
+off.
+
+For a TSM endpoint whose certificate is issued by a **private CA** the runner
+does not already trust, supply that CA certificate:
+
+```yaml
+- uses: sethbacon/terraform-drift-report@v1
+  with:
+    plan-json-file: plan.json
+    callback-url: https://tsm.internal.example.com/api/v1/drift/ingest
+    callback-token: ${{ secrets.TSM_CALLBACK_TOKEN }}
+    ca-cert: ${{ secrets.INTERNAL_ROOT_CA_PEM }}   # PEM, may hold a chain
+    callback-allowed-hosts: tsm.internal.example.com
+```
+
+Trusting the CA keeps verification on, which is the difference that matters: an
+attacker who answers for the callback host still cannot present a certificate
+your CA did not issue, so the token is not handed over. While `ca-cert` is set
+it **replaces** the default trust store for the callback request, so a
+publicly-trusted CA cannot vouch for an internal name either. `NODE_EXTRA_CA_CERTS`
+on the runner works too, if you prefer to trust the CA process-wide.
+
+> **`reject-unauthorized: false` was withdrawn.** It disabled certificate *and*
+> hostname verification together, so any host that answered for the callback
+> name — a hostile proxy, a spoofed DNS or ARP reply, a shared self-hosted
+> runner network — received the per-run token and the whole plan report in
+> full. Setting it now fails the step with a message pointing here. If you were
+> using it for a private CA, move that CA's certificate to `ca-cert` above; if a
+> run did go out with it set, rotate the token.
+
+When a handshake is refused the step reports the underlying reason rather than a
+bare `fetch failed`, because the reason decides the fix:
+`DEPTH_ZERO_SELF_SIGNED_CERT` / `UNABLE_TO_VERIFY_LEAF_SIGNATURE` means `ca-cert`
+is missing or wrong, while `ERR_TLS_CERT_ALTNAME_INVALID` means the certificate
+does not name the host you pointed at.
+
+## Module provenance
+
+With `include-module-provenance: true` (the default) the report carries two
+extra fields, and both are **projections** — neither document is forwarded
+verbatim, because the callback body is POSTed *and* written to a
+world-readable temp file:
+
+- **`plan`** — per top-level module call, only `source` and
+  `version_constraint`. Every literal argument (`expressions[*].constant_value`,
+  where a hardcoded password written in `.tf` would sit) and the recursive
+  `module` subtree are dropped by construction.
+- **`module_locks`** — per entry of `.terraform/modules/modules.json`, only
+  `Key`, `Source` and `Version`. `Dir` (the runner-local checkout path) and any
+  field Terraform adds later are dropped.
+
+Every `Source`/`source` is scrubbed of the credentials a go-getter address can
+embed — URL userinfo (`git::https://x-access-token:ghp_…@github.com/...`) and
+credential-bearing query parameters (`sshkey=`, `X-Amz-Signature=`, `token=`;
+only `ref` survives) — by the shared
+[`@4cloudguru/terraform-drift-contract`](https://www.npmjs.com/package/@4cloudguru/terraform-drift-contract),
+so both fields redact the same address identically. The TSM backend reads only
+`Source` + `Version` from the locks and the two `module_calls` fields, so the
+projection drops nothing a consumer uses.
 
 The host-authorization primitives come from
 [`@4cloudguru/pipeline-task-core`](https://www.npmjs.com/package/@4cloudguru/pipeline-task-core),

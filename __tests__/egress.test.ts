@@ -107,14 +107,9 @@ const redirectTo = (location: string) => (): Response =>
 
 describe('callback transport authorizes the initial URL and every redirect hop', () => {
   const post = (url: string, allowedHosts: string, fetchImpl: typeof fetch) =>
-    postJson(
-      url,
-      { 'X-TSM-Callback-Token': 'secret' },
-      '{}',
-      true,
-      createHostAuthorizer(allowedHosts, publicDns),
+    postJson(url, { 'X-TSM-Callback-Token': 'secret' }, '{}', createHostAuthorizer(allowedHosts, publicDns), {
       fetchImpl,
-    )
+    })
 
   it('refuses a private initial URL without issuing the request', async () => {
     const { fetch: impl, urls } = recordingFetch([ok])
