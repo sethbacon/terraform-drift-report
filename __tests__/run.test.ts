@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { summarize, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ATTRS_PER_ENTRY } from '@4cloudguru/terraform-drift-contract'
 
 // src/index.ts — all the orchestration, every output, and the ordering that
 // keeps the callback token out of the log — had no test at any point. It calls
@@ -367,5 +368,162 @@ describe('run: no plan-derived text reaches an unescaped log sink', () => {
       summary: { address: string }[]
     }
     expect(body.summary[0].address).toBe(hostile)
+  })
+})
+
+// The completeness markers — what the check did NOT do.
+//
+// The body used to be assembled by naming the contract's fields one at a time,
+// which meant it described the contract as of the day the list was written.
+// Contract 1.2.0 added five markers and every one of them was dropped here, so
+// a plan this action could not read left the runner as `drifted: false` with
+// zero counts — byte-identical to a verified-clean run. TSM auto-resolved the
+// live drift record on it, which is the fail-open these markers exist to name.
+//
+// Every case below asserts BOTH directions. A body that hardcoded
+// `unparseable: false` passes any test that only ever feeds it a readable plan,
+// and one that hardcoded `true` passes any test that only feeds it a broken
+// one; only the pair distinguishes a forwarded value from a constant.
+describe('run: the completeness markers reach the wire', () => {
+  const MARKERS = ['unparseable', 'unmasked', 'truncated', 'omitted_entries', 'omitted_attrs'] as const
+
+  function reportBody(): Record<string, unknown> {
+    return JSON.parse(fs.readFileSync(outputs.get('summary-file') as string, 'utf8'))
+  }
+
+  function postedBody(): Record<string, unknown> {
+    expect(postJson).toHaveBeenCalledTimes(1)
+    const args = postJson.mock.calls[0] as unknown as unknown[]
+    return JSON.parse(args[2] as string)
+  }
+
+  // The report file is documented as the exact callback body, so both are read:
+  // a refactor that assembled the POST separately would keep one right and send
+  // the other.
+  async function runWith(plan: unknown): Promise<Record<string, unknown>> {
+    inputs.set('plan-json-file', planAt(JSON.stringify(plan)))
+    inputs.set('callback-url', 'https://tsm.example.com/drift')
+    inputs.set('callback-token', 'tsm_TOKEN')
+    await runAction()
+    expect(failures).toEqual([])
+    const posted = postedBody()
+    for (const marker of MARKERS) expect(posted[marker]).toEqual(reportBody()[marker])
+    return posted
+  }
+
+  const UNREADABLE = {}
+  const CLEAN = { resource_changes: [] }
+  const UNMASKED = {
+    resource_changes: [
+      { address: 'aws_instance.x', change: { actions: ['update'], before: { size: 1 }, after: { size: 2 } } },
+    ],
+  }
+  const MASKED = {
+    resource_changes: [
+      {
+        address: 'aws_instance.x',
+        change: {
+          actions: ['update'],
+          before: { size: 1 },
+          after: { size: 2 },
+          before_sensitive: {},
+          after_sensitive: {},
+        },
+      },
+    ],
+  }
+  const TOO_MANY_ENTRIES = {
+    resource_changes: Array.from({ length: DEFAULT_MAX_ENTRIES + 3 }, (_unused, i) => ({
+      address: `aws_s3_bucket.b${i}`,
+      change: { actions: ['create'], before: null, after: {} },
+    })),
+  }
+  const attrs = (n: number, base: number): Record<string, number> =>
+    Object.fromEntries(Array.from({ length: n }, (_unused, i) => [`k${i}`, base + i]))
+  const TOO_MANY_ATTRS = {
+    resource_changes: [
+      {
+        address: 'aws_instance.w',
+        change: {
+          actions: ['update'],
+          before: attrs(DEFAULT_MAX_ATTRS_PER_ENTRY + 4, 0),
+          after: attrs(DEFAULT_MAX_ATTRS_PER_ENTRY + 4, 1000),
+          before_sensitive: {},
+          after_sensitive: {},
+        },
+      },
+    ],
+  }
+
+  // The load-bearing one. This body is `added:0 changed:0 destroyed:0
+  // drifted:false` — indistinguishable from CLEAN below on every other field.
+  // `unparseable` is the ONLY thing separating "we checked and it was clean"
+  // from "we never finished checking".
+  it('an unreadable document is reported as unparseable, not as clean', async () => {
+    const posted = await runWith(UNREADABLE)
+    expect(posted.unparseable).toBe(true)
+    expect([posted.added, posted.changed, posted.destroyed, posted.drifted]).toEqual([0, 0, 0, false])
+  })
+
+  // Positive control for the above: the false value has to travel too, or the
+  // marker is a constant and the assertion above proves nothing.
+  it('a genuinely clean plan is reported as parseable', async () => {
+    const posted = await runWith(CLEAN)
+    expect(posted.unparseable).toBe(false)
+    expect([posted.added, posted.changed, posted.destroyed, posted.drifted]).toEqual([0, 0, 0, false])
+  })
+
+  it('a change with no sensitivity metadata sets unmasked', async () => {
+    expect((await runWith(UNMASKED)).unmasked).toBe(true)
+  })
+
+  it('a change carrying sensitivity mirrors does not', async () => {
+    expect((await runWith(MASKED)).unmasked).toBe(false)
+  })
+
+  it('a capped summary reports how many rows were dropped', async () => {
+    const posted = await runWith(TOO_MANY_ENTRIES)
+    expect(posted.truncated).toBe(true)
+    expect(posted.omitted_entries).toBe(3)
+    // The counts are NOT capped, so `drifted` stays truthful: 503 creates, 500
+    // rows. That difference is only legible because omitted_entries is present.
+    expect(posted.added).toBe(DEFAULT_MAX_ENTRIES + 3)
+    expect((posted.summary as unknown[]).length).toBe(DEFAULT_MAX_ENTRIES)
+  })
+
+  it('a capped attribute list reports how many attrs were dropped', async () => {
+    const posted = await runWith(TOO_MANY_ATTRS)
+    expect(posted.truncated).toBe(true)
+    expect(posted.omitted_attrs).toBe(4)
+  })
+
+  it('an uncapped report says so rather than staying silent', async () => {
+    const posted = await runWith(UNMASKED)
+    expect(posted.truncated).toBe(false)
+    expect(posted.omitted_entries).toBe(0)
+    expect(posted.omitted_attrs).toBe(0)
+  })
+
+  // The class guard, and the reason the body is a spread rather than a pick
+  // list: this fails on the NEXT field the contract adds, not just on the five
+  // that were dropped this time. It reads the real package, so a contract bump
+  // that widens Result reddens here in the consumer that emits the payload.
+  it('every field the contract computes is forwarded, not just the ones named here', async () => {
+    const posted = await runWith(TOO_MANY_ENTRIES)
+    const computed = summarize(TOO_MANY_ENTRIES)
+    const dropped = Object.keys(computed).filter((k) => !(k in posted))
+    expect(dropped).toEqual([])
+    for (const marker of MARKERS) {
+      expect(posted[marker]).toEqual((computed as unknown as Record<string, unknown>)[marker])
+    }
+  })
+
+  // The names are not this repo's to choose. TSM decodes them as the json tags
+  // of `completeness` in internal/api/drift_records.go, and its own generated jq
+  // templates already post exactly these keys; a rename here is a silent drop
+  // there, because the callback deliberately does not use DisallowUnknownFields.
+  it('uses the snake_case wire names the receiver decodes', async () => {
+    const posted = await runWith(UNMASKED)
+    for (const marker of MARKERS) expect(Object.keys(posted)).toContain(marker)
   })
 })
