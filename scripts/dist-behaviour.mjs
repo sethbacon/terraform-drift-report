@@ -411,6 +411,182 @@ console.log('\n=== #21  an unusable proxy variable fails closed rather than goin
   check('and nothing was tunnelled either', connects.length === 0, JSON.stringify(connects))
 }
 
+// ------------------------------------------------- completeness markers ----
+// The contract's five markers describe what the check did NOT do. The body was
+// assembled by naming the contract's fields one at a time, so all five were
+// dropped on the floor: a plan the action could not read left the runner as
+// `drifted: false` with zero counts, byte-identical to a verified-clean run, and
+// TSM auto-resolved the live drift record on it.
+//
+// Driven here rather than only in the unit suite because the marker has to
+// survive the BUNDLE — this is the artifact consumers execute, and `--minify`
+// means nothing about it can be established by reading it.
+console.log('\n=== completeness markers reach the wire ===')
+{
+  const { summarize } = await import('@4cloudguru/terraform-drift-contract')
+  const MARKERS = ['unparseable', 'unmasked', 'truncated', 'omitted_entries', 'omitted_attrs']
+
+  const planWith = (name, doc) => {
+    const p = join(work, `${name}.json`)
+    writeFileSync(p, JSON.stringify(doc))
+    return p
+  }
+
+  // A TLS endpoint that records the bytes the bundle actually POSTs. The report
+  // file is read from the same run, because it is documented as the exact
+  // callback body and a refactor could keep one right while sending the other.
+  function postedFor(planPath) {
+    return new Promise((resolve) => {
+      let received = null
+      const server = createServer(TLS, (req, res) => {
+        let raw = ''
+        req.on('data', (d) => (raw += d))
+        req.on('end', () => {
+          received = raw
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end('{"ok":true}')
+        })
+      })
+      server.listen(0, '127.0.0.1', async () => {
+        const port = server.address().port
+        const r = await runAction({
+          'INPUT_PLAN-JSON-FILE': planPath,
+          'INPUT_CALLBACK-URL': `https://127.0.0.1:${port}/cb`,
+          'INPUT_CALLBACK-TOKEN': 'tok',
+          'INPUT_CALLBACK-ALLOWED-HOSTS': '127.0.0.1',
+          'INPUT_CA-CERT': CA,
+        })
+        server.close(() => resolve({ r, posted: received ? JSON.parse(received) : null }))
+      })
+    })
+  }
+
+  // `{}` parses as JSON but is not a plan: no resource_changes at all. This is a
+  // truncated `terraform show -json`, a wrong file, an empty document — every
+  // "we never finished checking" case, and until now every one of them reached
+  // the receiver as a clean result.
+  const UNREADABLE = {}
+  const CLEAN = { resource_changes: [] }
+  const UNMASKED = {
+    resource_changes: [
+      { address: 'aws_instance.x', change: { actions: ['update'], before: { size: 1 }, after: { size: 2 } } },
+    ],
+  }
+  const MASKED = {
+    resource_changes: [
+      {
+        address: 'aws_instance.x',
+        change: {
+          actions: ['update'],
+          before: { size: 1 },
+          after: { size: 2 },
+          before_sensitive: {},
+          after_sensitive: {},
+        },
+      },
+    ],
+  }
+  const CAPPED = {
+    resource_changes: Array.from({ length: 503 }, (_unused, i) => ({
+      address: `aws_s3_bucket.b${i}`,
+      change: { actions: ['create'], before: null, after: {} },
+    })),
+  }
+
+  const broken = await postedFor(planWith('unreadable', UNREADABLE))
+  check('the callback was issued for an unreadable document', broken.posted !== null, broken.r.stdout + broken.r.stderr)
+  check(
+    'an unreadable document is POSTed as unparseable',
+    broken.posted?.unparseable === true,
+    JSON.stringify(broken.posted?.unparseable),
+  )
+  // The whole point: on every other field this body is identical to CLEAN
+  // below. Without the marker the receiver cannot tell them apart, and resolved
+  // the record on both.
+  check(
+    'and it is otherwise indistinguishable from clean — 0/0/0, drifted false',
+    broken.posted?.added === 0 &&
+      broken.posted?.changed === 0 &&
+      broken.posted?.destroyed === 0 &&
+      broken.posted?.drifted === false,
+    JSON.stringify(broken.posted),
+  )
+  check(
+    'the report file agrees with the bytes that left the runner',
+    reportOf(broken.r).unparseable === true,
+    JSON.stringify(reportOf(broken.r).unparseable),
+  )
+
+  // Positive control. A body that hardcoded `unparseable: true` satisfies every
+  // assertion above; only a run where the value is genuinely false separates a
+  // forwarded marker from a constant. Same for each pair below.
+  const clean = await postedFor(planWith('clean', CLEAN))
+  check(
+    'a genuinely clean plan is POSTed as parseable (positive control)',
+    clean.posted?.unparseable === false,
+    JSON.stringify(clean.posted?.unparseable),
+  )
+
+  const unmasked = await postedFor(planWith('unmasked', UNMASKED))
+  check(
+    'a change with no sensitivity metadata sets unmasked',
+    unmasked.posted?.unmasked === true,
+    JSON.stringify(unmasked.posted?.unmasked),
+  )
+  const masked = await postedFor(planWith('masked', MASKED))
+  check(
+    'a change carrying sensitivity mirrors does not (positive control)',
+    masked.posted?.unmasked === false,
+    JSON.stringify(masked.posted?.unmasked),
+  )
+
+  const capped = await postedFor(planWith('capped', CAPPED))
+  check(
+    'a capped summary POSTs truncated + how many rows were dropped',
+    capped.posted?.truncated === true && capped.posted?.omitted_entries === 3,
+    JSON.stringify({ truncated: capped.posted?.truncated, omitted_entries: capped.posted?.omitted_entries }),
+  )
+  // The counts are NOT capped, so 503 creates arrive alongside 500 rows. That
+  // discrepancy is only legible because omitted_entries travels with it.
+  check(
+    'the counts stay whole while the summary is capped',
+    capped.posted?.added === 503 && capped.posted?.summary?.length === 500,
+    JSON.stringify({ added: capped.posted?.added, rows: capped.posted?.summary?.length }),
+  )
+  check(
+    'an uncapped report says so rather than staying silent (positive control)',
+    unmasked.posted?.truncated === false &&
+      unmasked.posted?.omitted_entries === 0 &&
+      unmasked.posted?.omitted_attrs === 0,
+    JSON.stringify({
+      truncated: unmasked.posted?.truncated,
+      omitted_entries: unmasked.posted?.omitted_entries,
+      omitted_attrs: unmasked.posted?.omitted_attrs,
+    }),
+  )
+
+  // The class guard. Fails on the NEXT field the contract adds, not just the
+  // five dropped this time — which is the difference between fixing an omission
+  // and closing the defect that produced it.
+  const computed = summarize(CAPPED)
+  const dropped = Object.keys(computed).filter((k) => !(k in (capped.posted ?? {})))
+  check('every field the contract computes is on the wire', dropped.length === 0, `dropped: ${dropped.join(', ')}`)
+  check(
+    'and each marker carries the contract-computed value, not a constant',
+    MARKERS.every((m) => JSON.stringify(capped.posted?.[m]) === JSON.stringify(computed[m])),
+    MARKERS.map((m) => `${m}: ${JSON.stringify(capped.posted?.[m])} vs ${JSON.stringify(computed[m])}`).join(' | '),
+  )
+  // The names belong to the receiver: TSM decodes them as the json tags of
+  // `completeness` (internal/api/drift_records.go) and its own generated jq
+  // templates post exactly these keys. The callback deliberately does not use
+  // DisallowUnknownFields, so a rename here is a silent drop there.
+  check(
+    'the snake_case wire names the receiver decodes are the ones sent',
+    MARKERS.every((m) => m in (capped.posted ?? {})),
+    JSON.stringify(Object.keys(capped.posted ?? {})),
+  )
+}
+
 // ------------------------------------------------------- post entrypoint ----
 // Everything above drives dist/index.js. dist/cleanup.js is the other half of
 // what consumers execute and had no coverage of any kind: `npm test` exercises

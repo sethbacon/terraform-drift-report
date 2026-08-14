@@ -237,6 +237,41 @@ new key without error.
 > `external_ref` for this — it carries a unique index for retry idempotency and
 > would collide across states sharing a commit.
 
+## Completeness markers
+
+The callback body carries the contract's five markers describing what this run
+**did not** do. They ride alongside the counts, in the report file and in the
+POST alike:
+
+| Field | Meaning |
+| --- | --- |
+| `unparseable` | the document did not have the shape of a plan — nothing was actually checked |
+| `unmasked` | a change carried no sensitivity metadata, so nothing was redacted for it |
+| `truncated` | a bound was reached and the summary is not the whole story |
+| `omitted_entries` | summary rows dropped by the entry cap (**the counts still include them**) |
+| `omitted_attrs` | changed attributes dropped by the per-row cap, across all rows |
+
+`unparseable` is the one that changes an answer. Without it a truncated
+`terraform show -json`, a wrong file, an empty `{}` and a genuinely clean plan
+all leave the runner as `added: 0, changed: 0, destroyed: 0, drifted: false` —
+byte-identical bodies — so "we checked and it was clean" and "we never finished
+checking" were the same report. TSM auto-resolved the live drift record on
+either. It no longer does, but only because the marker now arrives: a producer
+that omits it is still indistinguishable from a clean run.
+
+`truncated` and the two counters matter for the same reason one step down. The
+summary is capped; the **counts are not**, so a capped report has honest totals
+and a partial list, and `omitted_entries` is the only thing that says so.
+
+The names are the contract's field names unchanged, which is also what TSM
+decodes. Nothing here renames them, and nothing should: the drift callback token
+is one-shot, so the receiver deliberately ignores unknown keys rather than
+rejecting a body it cannot retry — which means a misspelled marker is dropped in
+silence rather than reported. `src/index.ts` builds the body by **spreading**
+the contract's result rather than naming its fields, and `CallbackBody extends
+Result`, so a field the contract adds next is forwarded by construction and
+dropping one is a compile error.
+
 ## Contract
 
 The count/summary semantics are defined by

@@ -1,6 +1,6 @@
 import * as core from '@actions/core'
 import * as fs from 'fs'
-import { Plan, summarize, moduleCallsPlan } from '@4cloudguru/terraform-drift-contract'
+import { Plan, Result, summarize, moduleCallsPlan } from '@4cloudguru/terraform-drift-contract'
 import { truncateForLog } from '@4cloudguru/pipeline-task-core'
 import { describeError, postJson, resolveTlsTrust } from './callback'
 import { createHostAuthorizer } from './egress'
@@ -14,14 +14,27 @@ import { writeReport } from './report-file'
  * could not catch a typo'd key, a wrong field type or a field dropped in a
  * refactor. The only thing that would notice was the backend, at run time, on
  * the one payload that leaves the runner with a credential attached.
+ *
+ * It then restated the contract's fields one by one, which reintroduced the
+ * same failure in a slower form: the list could only ever describe the contract
+ * as it stood the day it was written, and a field the contract added later was
+ * dropped with nothing red. That is exactly what happened — contract 1.2.0 added
+ * five completeness markers (`unparseable`, `unmasked`, `truncated`,
+ * `omitted_entries`, `omitted_attrs`) and this body forwarded none of them, so a
+ * plan the action could not read arrived at TSM as `drifted: false` and was
+ * indistinguishable from a verified-clean one. TSM auto-resolved the drift
+ * record on it.
+ *
+ * So `extends Result` rather than a copy of its members: the contract's own
+ * type is the list, every field of it is REQUIRED here, and the body below is
+ * built by spreading `result`. A field the contract adds next is forwarded by
+ * construction, and deleting one becomes a compile error rather than a silent
+ * omission. The wire names are the contract's field names unchanged, which is
+ * also what the backend decodes (`completeness` in `internal/api/
+ * drift_records.go`) and what its generated jq templates already post.
  */
-export interface CallbackBody {
+export interface CallbackBody extends Result {
   status: string
-  added: number
-  changed: number
-  destroyed: number
-  drifted: boolean
-  summary: ReturnType<typeof summarize>['summary']
   detail: string
   /**
    * The commit the plan was computed from. Omitted rather than sent empty, so a
@@ -95,13 +108,12 @@ async function run(): Promise<void> {
     // from a different commit still overrides it.
     const commitSha = core.getInput('commit-sha') || process.env.GITHUB_SHA || ''
 
+    // Spread, not a pick list. Everything the contract computed goes on the
+    // wire, including the markers that say what this check did NOT do; only the
+    // two fields the contract does not own are added here.
     const body: CallbackBody = {
+      ...result,
       status: 'completed',
-      added: result.added,
-      changed: result.changed,
-      destroyed: result.destroyed,
-      drifted: result.drifted,
-      summary: result.summary,
       detail,
     }
     if (commitSha) body.commit_sha = commitSha
