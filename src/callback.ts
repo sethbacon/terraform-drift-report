@@ -1,5 +1,11 @@
-import { HttpError, METADATA_TIMEOUT_MS, createHttpClient } from '@4cloudguru/pipeline-task-core'
-import { Agent } from 'undici'
+import {
+  HttpError,
+  METADATA_TIMEOUT_MS,
+  createHttpClient,
+  resolveEnvProxy,
+  type ProxyEnvironment,
+} from '@4cloudguru/pipeline-task-core'
+import { Agent, ProxyAgent, type Dispatcher } from 'undici'
 import { URL } from 'url'
 import type { AuthorizeHost } from './egress'
 
@@ -19,6 +25,19 @@ export interface HttpsClientOptions {
   caCert?: string
   /** `fetch` implementation, injectable so tests need no network. */
   fetchImpl?: typeof fetch
+  /**
+   * The runner's environment, read for `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`.
+   * Defaults to `process.env`; injectable so tests need no global mutation.
+   */
+  env?: ProxyEnvironment
+  /**
+   * Registers a proxy credential with the job's mask. Wire to `core.setSecret`.
+   *
+   * A proxy URL may embed `user:password@`, and it reaches this process from the
+   * environment rather than from an action input, so nothing else in the run has
+   * had the chance to mask it.
+   */
+  setSecret?: (secret: string) => void
 }
 
 /** Refusal text for the withdrawn `reject-unauthorized: false`; names the replacement. */
@@ -89,6 +108,14 @@ export function describeError(error: unknown): string {
  * ADDING its certificate as a trust anchor (`caCert`), which keeps both chain
  * and hostname verification — the two checks that the withdrawn
  * verification-off switch dropped together.
+ *
+ * On a self-hosted runner behind a mandatory egress proxy the request is routed
+ * through it, because Node's `fetch` honours none of `HTTPS_PROXY` /
+ * `HTTP_PROXY` / `NO_PROXY` on its own and the callback is the one outbound
+ * request in this action that carries a credential and the plan contents — the
+ * one an organisation most needs inside its chokepoint. The proxy decision is
+ * re-taken for EVERY hop, never once for the original URL; see
+ * {@link dispatcherFor}.
  */
 export function postJson(
   url: string,
@@ -97,19 +124,78 @@ export function postJson(
   authorizeHost: AuthorizeHost,
   options: HttpsClientOptions = {},
 ): Promise<HttpResponse> {
-  const { caCert, fetchImpl } = options
-  // One dispatcher per call, built only when the operator supplied a trust
-  // anchor; Node's fetch has no other way to reach that socket option.
-  const dispatcher = caCert ? new Agent({ connect: { ca: caCert } }) : undefined
+  const { caCert, fetchImpl, env, setSecret } = options
+  // Built only when the operator supplied a trust anchor; Node's fetch has no
+  // other way to reach that socket option. Used for the hops that go direct.
+  const direct = caCert ? new Agent({ connect: { ca: caCert } }) : undefined
+  // Keyed by proxy URL so a redirect chain reuses one connection pool per proxy
+  // instead of leaking a fresh one per hop.
+  const proxyAgents = new Map<string, ProxyAgent>()
+  const masked = new Set<string>()
+
+  /**
+   * The dispatcher for ONE hop, chosen from that hop's own destination.
+   *
+   * Resolved per hop rather than once for the original URL because every part
+   * of the decision belongs to the destination: `NO_PROXY` is matched against
+   * it and its scheme picks the variable. A chain that redirects off the origin
+   * — say from a proxied public host to an internal one covered by `NO_PROXY` —
+   * has to be answered again, and resolving once would send the later hops
+   * through the wrong route (or through a proxy that is not permitted to see
+   * them at all).
+   *
+   * WHAT THIS DOES NOT DECIDE. A proxy changes which socket carries the
+   * request, never which destination is permitted. `authorizeHost` still runs
+   * against the DESTINATION host — the initial one below and every redirect hop
+   * in `redirectPolicy` — and its subject is never the proxy: a CONNECT tunnel
+   * to an unauthorized host is still unauthorized egress. Nothing here is
+   * consulted by that decision, and nothing here can widen it.
+   */
+  function dispatcherFor(hopUrl: string): Dispatcher | undefined {
+    let proxy: ReturnType<typeof resolveEnvProxy>
+    try {
+      proxy = resolveEnvProxy(hopUrl, env)
+    } catch (error) {
+      // Re-thrown NON-retryable, for the same reason the redirect refusal below
+      // is: an unusable proxy variable is a configuration error, and the shared
+      // client treats any non-HttpError as a transient transport failure, so a
+      // plain throw would be retried three times over. Fail closed and once —
+      // never silently direct, which is the failure that would put the callback
+      // token outside the chokepoint the variable exists to enforce.
+      throw new HttpError(error instanceof Error ? error.message : String(error), false)
+    }
+    if (!proxy) return direct
+    // Masked before the agent is constructed, so a proxy that refuses the
+    // connection cannot put the credential in the error text unmasked. Deduped
+    // because a redirect chain resolves the same proxy repeatedly and each
+    // registration is an ::add-mask:: line in the log.
+    for (const secret of proxy.secrets) {
+      if (masked.has(secret)) continue
+      masked.add(secret)
+      setSecret?.(secret)
+    }
+    let agent = proxyAgents.get(proxy.proxyUrl)
+    if (!agent) {
+      // `requestTls`, not `connect`: with a tunnel in play that is the TLS
+      // handshake with the DESTINATION, which is the peer `caCert` vouches for.
+      // Putting the anchor on the proxy leg instead would leave the destination
+      // handshake on the default store and fail exactly the private-CA case the
+      // input exists for.
+      agent = new ProxyAgent(caCert ? { uri: proxy.proxyUrl, requestTls: { ca: caCert } } : { uri: proxy.proxyUrl })
+      proxyAgents.set(proxy.proxyUrl, agent)
+    }
+    return agent
+  }
 
   const client = createHttpClient({
     fetchImpl,
-    fetchOptions: () => {
+    fetchOptions: (hopUrl) => {
       const init: RequestInit = {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
         body,
       }
+      const dispatcher = dispatcherFor(hopUrl)
       if (dispatcher) {
         ;(init as RequestInit & { dispatcher: unknown }).dispatcher = dispatcher
       }
