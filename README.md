@@ -20,6 +20,7 @@ works) and your cloud's first-party OIDC auth action.
 | `include-module-provenance` | `true` | include projected `module_calls` (+ `module_locks`) in the report (see [Module provenance](#module-provenance)) |
 | `fail-on-drift` | `false` | fail the step when drift is detected |
 | `detail` | `""` | free-text run label forwarded as the callback `detail` |
+| `commit-sha` | `""` → `GITHUB_SHA` | commit the plan was computed from, sent as `commit_sha` (see [Report provenance](#report-provenance)) |
 | `callback-url` | `""` | TSM callback URL; POST happens only with both url + token |
 | `callback-token` | `""` | per-run one-shot token (sent as `X-TSM-Callback-Token`) |
 | `ca-cert` | `""` | PEM CA certificate for a callback endpoint behind a private CA (see [Private CAs](#private-cas)) |
@@ -156,6 +157,36 @@ The host-authorization primitives come from
 [`@4cloudguru/pipeline-task-core`](https://www.npmjs.com/package/@4cloudguru/pipeline-task-core),
 shared with the Azure Pipelines task extensions, so this action and they cannot
 drift apart.
+
+## Report provenance
+
+The callback body carries **`commit_sha`**: the commit the plan was computed
+from. It defaults to the runner's `GITHUB_SHA`, so a report is bound to a tree
+without the workflow setting anything; `commit-sha` overrides it when the plan
+genuinely comes from a different commit.
+
+This matters because drift reports are consumed as a **time series**, which is
+the point of the callback. Without a commit, two reports for the same state are
+ordered only by arrival time — so a re-run against an older commit lands after a
+newer one and reads as the current state, no report can be re-derived or audited
+against the tree it describes, and "drift appeared between X and Y" is not
+answerable.
+
+The field is **omitted rather than sent empty** when there is no commit to
+report, so a receiver can distinguish "this runner had none" from "an older
+version of this action that never sent one". Both are backward-compatible: the
+TSM endpoints decode with unknown keys ignored, so an older backend accepts the
+new key without error.
+
+> **What the receiver does with it is a separate question.** As of this writing
+> neither TSM drift endpoint declares a commit field and the `drift_records`
+> table has no column for one, so `commit_sha` is currently accepted and
+> dropped. Persisting it needs a backend change; sending it is the half that has
+> to come first, and the sibling
+> [`terraform-module-publish`](https://github.com/sethbacon/terraform-module-publish)
+> binds its published versions the same way. Do **not** repurpose TSM's
+> `external_ref` for this — it carries a unique index for retry idempotency and
+> would collide across states sharing a commit.
 
 ## Contract
 
