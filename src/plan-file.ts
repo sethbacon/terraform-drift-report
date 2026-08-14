@@ -44,16 +44,25 @@ export function readPlanFile(planFile: string): string {
     }
   }
 
-  const size = fs.statSync(planFile).size
-  if (size > MAX_PLAN_BYTES) {
-    throw new Error(
-      `plan-json-file is ${size} bytes, above this action's ${MAX_PLAN_BYTES}-byte limit. ` +
-        `The report is built in memory and serialised twice, so an unbounded plan is an ` +
-        `unbounded allocation on the runner.`,
-    )
+  // One descriptor from here on. `statSync(path)` then `readFileSync(path)`
+  // resolves the path twice, so the size that was checked and the bytes that
+  // are read are not guaranteed to be the same file — a check-then-use race
+  // (CodeQL's js/file-system-race), and a pointless one, since fstat answers
+  // the same question about the object already open.
+  const fd = fs.openSync(planFile, 'r')
+  try {
+    const size = fs.fstatSync(fd).size
+    if (size > MAX_PLAN_BYTES) {
+      throw new Error(
+        `plan-json-file is ${size} bytes, above this action's ${MAX_PLAN_BYTES}-byte limit. ` +
+          `The report is built in memory and serialised twice, so an unbounded plan is an ` +
+          `unbounded allocation on the runner.`,
+      )
+    }
+    return fs.readFileSync(fd, 'utf8')
+  } finally {
+    fs.closeSync(fd)
   }
-
-  return fs.readFileSync(planFile, 'utf8')
 }
 
 /**
