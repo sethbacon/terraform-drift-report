@@ -56,8 +56,22 @@ export function readPlanFile(planFile: string): string {
   return fs.readFileSync(planFile, 'utf8')
 }
 
-/** True when `target` is `root` itself or sits underneath it. */
+/**
+ * True when `target` is `root` itself or sits underneath it.
+ *
+ * `root` is resolved by attempting it, not by testing first: an
+ * `existsSync`-then-`realpathSync` pair is a check-then-use race (CodeQL's
+ * `js/file-system-race`), and here it is also pointless — the only thing the
+ * test decided was which of two values to hand `path.relative`, which the catch
+ * decides just as well without a window in between.
+ */
 function isWithin(root: string, target: string): boolean {
-  const rel = path.relative(fs.existsSync(root) ? fs.realpathSync(root) : root, target)
+  let base: string
+  try {
+    base = fs.realpathSync(root)
+  } catch {
+    base = root
+  }
+  const rel = path.relative(base, target)
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
 }
