@@ -1,32 +1,57 @@
 /**
- * Fails the build when the bundler could not resolve a module and quietly
- * planted a throwing stub where the `require` should have been.
+ * Refuses to certify a dist/ that will not load on a runner.
  *
- * WHY THIS EXISTS. `@vercel/ncc` 0.38.4 failed loudly when it could not bundle
- * a dependency. 0.44.1 exits 0, emits a `webpackMissingModule` stub in its
- * place, and writes a bundle that throws MODULE_NOT_FOUND before the first line
- * of the action runs. Nothing else in this repo notices:
+ * WHY THIS EXISTS. dist/ is committed, minified and never read by a human, and
+ * nothing else in this repo looks at it in a way that could notice it is dead:
  *
  *  - `npm run lint` and `npm test` read src/, never the bundle;
- *  - both dist gates compare dist/ to a fresh build OF ITSELF, so a stub that
- *    has been committed matches its own rebuild byte-for-byte and passes;
- *  - the behaviour harness does execute dist/index.js — but only after someone
- *    has already committed the stub, and only for the entrypoints it drives.
+ *  - both dist gates compare dist/ to a fresh build OF ITSELF, so a broken
+ *    bundle that has been committed matches its own rebuild byte-for-byte and
+ *    passes;
+ *  - the behaviour harness does execute dist/, but only after someone has
+ *    already committed the broken bundle.
  *
- * Observed, not hypothetical. `@actions/core` 3.x is ESM-only (`"type":
- * "module"` with an import-only `exports` map), so the CJS build cannot resolve
- * it. On that bump `npm run build` exits 0 while dist/cleanup.js collapses from
- * 498 KB to 1.8 KB of stub and dist/index.js throws on require.
+ * WHAT CHANGED WITH THE BUNDLER. Under `@vercel/ncc` the failure mode was a
+ * quiet one: webpack planted a `webpackMissingModule` stub where a require it
+ * could not resolve should have been, and ncc 0.44.1 exited 0 around it. That
+ * marker is webpack's, and esbuild never emits it — a guard still keyed on the
+ * string would go green forever while checking nothing.
  *
- * This runs as the last step of `npm run build`, so a stub bundle cannot be
- * produced at all — not in CI, not on a maintainer's machine, and not by any
- * future automation that rebuilds dist/ on a dependency bump. That last case is
- * the point: the mechanical fix for a stale bundle is "rebuild and commit", and
- * without this guard that fix cheerfully ships a dead action.
+ * esbuild fails loudly on a top-level import it cannot resolve — `error: Could
+ * not resolve "x"`, exit 1, nothing written. It does NOT fail on the three
+ * shapes below, every one of which was reproduced against esbuild 0.28.2 before
+ * this guard was written, and every one of which exits 0 and writes a bundle
+ * that dies with MODULE_NOT_FOUND on the first line the runner executes:
+ *
+ *  1. `--external:undici` on the build line. Exit 0, `require("undici")` in the
+ *     output. `--packages=external` is the same defect wholesale.
+ *  2. `require("not-installed")` inside a try/catch — the optional-dependency
+ *     idiom. esbuild does not resolve it, does not error, and does not even
+ *     WARN; the literal is copied straight through.
+ *  3. `require(someExpression)`. For a CJS/node build esbuild leaves the call
+ *     alone, silently, because `require` is a real global there.
+ *
+ * The invariant this enforces, therefore: NOTHING in an emitted bundle resolves
+ * a module at run time except a Node builtin. A literal specifier that is not a
+ * builtin gets looked up in a node_modules that is not shipped beside dist/; a
+ * computed one is a resolution esbuild could not perform either. Both land
+ * exactly where the old webpack stub landed — MODULE_NOT_FOUND, before the
+ * action's first line.
+ *
+ * The two structural checks are bundler-independent and stay as they were: a
+ * build that emitted nothing, and an entrypoint action.yml declares that this
+ * build did not produce.
+ *
+ * NOT COVERED HERE, deliberately: esbuild does not type-check, where ncc's
+ * ts-loader did and failed the build on a type error. That gap is closed in the
+ * build script itself (`npm run build` runs `tsc --noEmit` first), because it
+ * is a property of the SOURCE and cannot be recovered by reading the minified
+ * output.
  *
  * Run: node scripts/verify-bundle.mjs [dist-dir] [action.yml]
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { isBuiltin } from 'node:module'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -41,12 +66,31 @@ const actionYml = process.argv[3] ?? join(root, 'action.yml')
 const actionRoot = dirname(actionYml)
 
 /**
- * The marker webpack (and therefore ncc) emits for a require it could not
- * resolve. Keyed on the function name rather than on the "Cannot find module"
- * text, because that sentence also appears in legitimately bundled code —
- * Node's own loader messages get inlined by more than one dependency.
+ * The specifier of every `require(...)` and dynamic `import(...)` call site in a
+ * bundle — `null` where the call carries an expression rather than a literal.
+ *
+ * The lookbehind rejects `foo.require(` and identifiers merely ending in
+ * `require`, which is what minified output is full of. Each hit is then
+ * classified by the character following the paren: a quote means esbuild
+ * resolved the specifier and wrote it out, anything else (including a template
+ * literal) means the call survived with a run-time resolution in it.
  */
-const STUB_MARKER = 'webpackMissingModule'
+function moduleResolutions(text) {
+  const found = []
+  for (const re of [/(?<![.\w$])require\s*\(\s*/g, /(?<![.\w$])import\s*\(\s*/g]) {
+    while (re.exec(text) !== null) {
+      const quote = text[re.lastIndex]
+      if (quote !== '"' && quote !== "'") {
+        found.push(null)
+        continue
+      }
+      const end = text.indexOf(quote, re.lastIndex + 1)
+      if (end === -1) continue // unterminated: not a call site we can read
+      found.push(text.slice(re.lastIndex + 1, end))
+    }
+  }
+  return found
+}
 
 let failures = 0
 const fail = (message) => {
@@ -93,8 +137,8 @@ if (bundles.length === 0) {
   fail(`No bundles found under ${relative(root, distDir) || distDir}. The build emitted nothing to verify.`)
 }
 
-// Bidirectional: the stub scan below proves the bundles that EXIST are sound,
-// which says nothing about one that was never emitted. action.yml is the
+// Bidirectional: the resolution scan below proves the bundles that EXIST are
+// sound, which says nothing about one that was never emitted. action.yml is the
 // contract for what has to be there, so it is what the build is measured
 // against — a `post:` script that silently stopped being produced would
 // otherwise surface only as a consumer's job failing at the end of every run.
@@ -111,19 +155,34 @@ for (const entrypoint of entrypoints) {
   }
 }
 
+let resolved = 0
 for (const file of bundles) {
   const text = readFileSync(file, 'utf8')
-  if (!text.includes(STUB_MARKER)) continue
-  const missing = [
-    ...new Set(Array.from(text.matchAll(/Cannot find module '([^']+)'/g), (m) => m[1])),
-  ]
-  fail(
-    `${relative(root, file)} contains a ${STUB_MARKER} stub` +
-      `${missing.length ? ` for ${missing.map((m) => `'${m}'`).join(', ')}` : ''}. ` +
-      `The bundler could not resolve that import and emitted a throwing placeholder instead of ` +
-      `failing, so this bundle raises MODULE_NOT_FOUND before the action runs. A dependency that ` +
-      `has gone ESM-only is the usual cause. Do NOT commit this bundle.`,
-  )
+  const resolutions = moduleResolutions(text)
+  resolved += resolutions.length
+
+  const external = [...new Set(resolutions.filter((s) => s !== null && !isBuiltin(s)))]
+  if (external.length > 0) {
+    fail(
+      `${relative(root, file)} resolves ${external.map((s) => `'${s}'`).join(', ')} at run time. ` +
+        `Those are not Node builtins, so the runner looks for them in a node_modules beside ` +
+        `dist/ — which does not exist — and the action dies with MODULE_NOT_FOUND before its ` +
+        `first line. Either the build line excluded them (--external / --packages=external), or ` +
+        `they are required inside a try/catch, which esbuild copies through without resolving ` +
+        `and without warning. Bundle them or vendor them; do NOT commit this bundle.`,
+    )
+  }
+
+  const dynamic = resolutions.filter((s) => s === null).length
+  if (dynamic > 0) {
+    fail(
+      `${relative(root, file)} contains ${dynamic} ${dynamic === 1 ? 'call' : 'calls'} ` +
+        `to require()/import() with a computed specifier. esbuild resolved nothing there and said ` +
+        `nothing about it — for a CJS/node build it leaves such a call exactly as written — so ` +
+        `whatever it names is looked up at run time in a node_modules that is not shipped. ` +
+        `Do NOT commit this bundle.`,
+    )
+  }
 }
 
 if (failures > 0) {
@@ -133,5 +192,6 @@ if (failures > 0) {
 
 console.log(
   `Bundle verification passed: ${bundles.length} emitted bundle(s), ` +
-    `${entrypoints.length} declared entrypoint(s), no unresolved-module stubs.`,
+    `${entrypoints.length} declared entrypoint(s), ${resolved} run-time module resolution(s), ` +
+    `all of them Node builtins.`,
 )

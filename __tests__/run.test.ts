@@ -80,7 +80,11 @@ function planAt(contents = PLAN): string {
 
 async function runAction(): Promise<void> {
   vi.resetModules()
-  await import('../src/index')
+  // Extension-ful because tsconfig resolves as Node does: a dynamic import() is
+  // an ESM resolution even from a CommonJS file, and ESM does no extension
+  // guessing. Static imports elsewhere in this suite stay bare — those are
+  // CommonJS `require` calls, which do.
+  await import('../src/index.js')
   // `void run()` is fired at import; let its microtasks settle.
   await new Promise((resolve) => setTimeout(resolve, 0))
 }
