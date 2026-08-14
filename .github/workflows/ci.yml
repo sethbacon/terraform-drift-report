@@ -27,9 +27,17 @@ jobs:
         run: npm run test:dist
 
       - name: Rebuild bundle and fail if dist is stale
+        # `git diff` compares TRACKED content only, so a file the build newly
+        # emits into dist/ is invisible to it — and this build emits two entry
+        # points plus a temporary dist/cleanup-build/ directory, so "the build
+        # left something new behind" is a live shape here, not a hypothetical.
+        # Stage the directory first and diff the INDEX so added, modified and
+        # deleted paths are all caught; --force covers a path a .gitignore rule
+        # (e.g. *.tsbuildinfo) would otherwise hide.
         run: |
           npm run build
-          if ! git diff --exit-code -- dist; then
+          git add --force -A -- dist
+          if ! git diff --cached --exit-code -- dist; then
             echo "::error::dist is out of date — run 'npm run build' and commit the result."
             exit 1
           fi
