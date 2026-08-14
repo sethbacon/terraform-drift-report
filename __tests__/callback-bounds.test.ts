@@ -112,3 +112,38 @@ describe('drift callback — remote text reaching the failure annotation', () =>
     )
   })
 })
+
+describe('drift callback — URL-embedded credentials are refused, not discarded', () => {
+  /**
+   * fetch drops URL userinfo on the floor: it is neither sent as an
+   * Authorization header nor reported. An author who wrote
+   * `https://user:secret@tsm.example.com/drift` got an unauthenticated request,
+   * a 401, and a failure message that says nothing about the credential this
+   * action silently threw away — while the secret still sat in their workflow.
+   */
+  it.each([
+    ['user and password', 'https://user:s3cret@tsm.example/cb'],
+    ['a bare token as username', 'https://t0ken@tsm.example/cb'],
+  ])('refuses %s', async (_label, url) => {
+    await expect(
+      postJson(url, {}, '{}', allowAll, { fetchImpl: respondingWith('ok') }),
+    ).rejects.toThrow(/must not embed credentials/)
+  })
+
+  it('does not reach the network when it refuses', async () => {
+    let called = false
+    const spy = (async () => {
+      called = true
+      return new Response('ok', { status: 200 })
+    }) as unknown as typeof fetch
+    await expect(postJson('https://u:p@tsm.example/cb', {}, '{}', allowAll, { fetchImpl: spy })).rejects.toThrow()
+    expect(called).toBe(false)
+  })
+
+  it('a URL without userinfo is unaffected', async () => {
+    const resp = await postJson('https://tsm.example/cb', {}, '{}', allowAll, {
+      fetchImpl: respondingWith('ok'),
+    })
+    expect(resp.status).toBe(200)
+  })
+})

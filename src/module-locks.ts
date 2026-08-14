@@ -56,20 +56,33 @@ export function projectModuleLocks(modules: unknown): ModuleLock[] {
 
 /**
  * Reads `.terraform/modules/modules.json` for the callback's `module_locks`
- * field; returns null when absent or unreadable (the backend then records
- * provenance without locked versions, exactly as the jq template does).
+ * field; returns null when absent or unreadable. The backend then records
+ * provenance without locked versions, as the backend's own dispatched CI
+ * templates do (`terraform-state-manager-backend`, the jq in the dispatch
+ * templates) — an earlier comment cited "the jq template" as though it were a
+ * file in this repository, and a repo-wide search for `jq` finds nothing.
+ *
+ * ABSENT and UNREADABLE are the same return value but NOT the same event.
+ * Absent is expected and silent; a permissions error, an I/O error or a corrupt
+ * manifest is a misconfiguration the author can fix, and collapsing it onto the
+ * same silent null meant a mistyped `module-manifest` dropped provenance with no
+ * signal. `onError` is how the caller surfaces that without this module
+ * depending on `@actions/core`.
  *
  * The manifest is PROJECTED, never forwarded verbatim: it is written by
  * Terraform from operator-supplied module sources, so its `Source` entries
  * carry whatever credential the source address embeds, and the callback body is
- * both POSTed and written to a world-readable temp file.
+ * both POSTed and written to a temp file.
  */
-export function readModuleLocks(manifestPath: string): unknown {
+export function readModuleLocks(manifestPath: string, onError?: (message: string) => void): unknown {
+  if (!manifestPath || !fs.existsSync(manifestPath)) return null
   try {
-    if (!fs.existsSync(manifestPath)) return null
     const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as { Modules?: unknown }
     return { Modules: projectModuleLocks(raw?.Modules) }
-  } catch {
+  } catch (error) {
+    onError?.(
+      `${manifestPath} exists but could not be read as JSON (${error instanceof Error ? error.message : String(error)}).`,
+    )
     return null
   }
 }

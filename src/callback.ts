@@ -136,8 +136,21 @@ export function postJson(
   })
 
   return (async () => {
+    const parsed = new URL(url)
+    // fetch drops URL userinfo on the floor: it is neither sent as an
+    // Authorization header nor reported. An author who wrote
+    // `https://user:secret@tsm.example.com/drift` got an unauthenticated
+    // request, a 401, and a failure message that says nothing about the
+    // credential this action silently discarded — while the secret still sat in
+    // their workflow file. Refuse it and name the supported mechanism.
+    if (parsed.username || parsed.password) {
+      throw new Error(
+        'callback-url must not embed credentials (user:password@host). They are not sent — ' +
+          'authenticate with callback-token, which is transmitted as the X-TSM-Callback-Token header.',
+      )
+    }
     // Outside the retrying accessor, so this refusal is already fatal.
-    await authorizeHost(new URL(url).hostname)
+    await authorizeHost(parsed.hostname)
     // fetchStatusText, not a hand-rolled `consume`: a caller-supplied consume
     // never reaches the shared client's readBounded, so maxResponseBytes did
     // not apply to it and a hostile or wedged callback host could stream until
