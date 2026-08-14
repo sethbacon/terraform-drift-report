@@ -98,7 +98,7 @@ reaches this action through an ordinary Dependabot bump rather than a manual pin
 move. It is published with npm provenance from a trusted-publishing workflow;
 `npm audit signatures` verifies the attestation.
 
-This action ships a committed, ncc-bundled `dist/index.js` — that bundle, not
+This action ships a committed, esbuild-bundled `dist/index.js` — that bundle, not
 `src/`, is what runs. CI rebuilds it on every PR and fails if the committed
 bundle differs, so a dependency upgrade that never reached `dist/` cannot merge.
 

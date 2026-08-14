@@ -29,7 +29,9 @@ afterEach(() => {
 
 async function runCleanup(): Promise<void> {
   vi.resetModules()
-  await import('../src/cleanup')
+  // See the note in run.test.ts: a dynamic import() resolves under ESM rules
+  // even here, so the extension is not optional.
+  await import('../src/cleanup.js')
 }
 
 describe('cleanup', () => {

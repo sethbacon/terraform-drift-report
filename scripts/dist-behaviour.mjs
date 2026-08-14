@@ -21,9 +21,10 @@ const DIST = process.argv[2] ?? new URL("../dist/index.js", import.meta.url).pat
 // `post: dist/cleanup.js` — and only the first was ever executed here. The post
 // step is the one that deletes a report full of unredacted attribute values, so
 // "it silently stopped working" is not a cosmetic failure. It is also the entry
-// point that degrades most quietly: ncc emits a `webpackMissingModule` stub
-// rather than failing, and on the @actions/core 3.x bump this bundle collapses
-// from 498 KB to 1.8 KB while `npm run build` still exits 0.
+// point that degrades most quietly: it exists only because the build line names
+// a second source file, and a build that emitted just the first still exits 0.
+// scripts/verify-bundle.mjs catches that against action.yml; this catches a
+// cleanup.js that is present and does not work.
 const CLEANUP = process.argv[3] ?? join(dirname(DIST), 'cleanup.js')
 const work = mkdtempSync(join(tmpdir(), 'distproof-'))
 
