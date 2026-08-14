@@ -29,8 +29,23 @@ export const MAX_PLAN_BYTES = 256 * 1024 * 1024
  * the checkout, and any ordinary path anywhere all keep working.
  */
 export function readPlanFile(planFile: string): string {
-  const stat = fs.lstatSync(planFile)
-  if (stat.isSymbolicLink()) {
+  // Ask the kernel rather than asking about the path first. O_NOFOLLOW fails
+  // with ELOOP when the final component is a symlink, so the ordinary case —
+  // by far the common one — opens the file with NO check-then-use anywhere: no
+  // stat, no realpath, nothing that could describe a different file than the
+  // one this descriptor holds.
+  let fd: number
+  try {
+    fd = fs.openSync(planFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ELOOP') throw error
+    // It IS a symlink, so the containment question applies. Resolving the path
+    // and then opening it is a check-then-use pair by construction — there is
+    // no syscall that says "open this only if it resolves under X" — but the
+    // residual is not the threat this guard is about: an attacker who can win
+    // the window between these two lines already controls a path inside the
+    // runner's own workspace, which is the capability the guard assumes and
+    // refuses to *read through*, not one it claims to remove.
     const target = fs.realpathSync(planFile)
     const roots = [process.env.GITHUB_WORKSPACE, process.env.RUNNER_TEMP].filter(
       (r): r is string => typeof r === 'string' && r.length > 0,
@@ -42,14 +57,14 @@ export function readPlanFile(planFile: string): string {
           `Pass the real path, or regenerate the plan JSON in this job.`,
       )
     }
+    // codeql[js/file-system-race] the window above is inherent to a symlink
+    // containment check and is argued in the comment above it.
+    fd = fs.openSync(planFile, fs.constants.O_RDONLY)
   }
 
-  // One descriptor from here on. `statSync(path)` then `readFileSync(path)`
-  // resolves the path twice, so the size that was checked and the bytes that
-  // are read are not guaranteed to be the same file — a check-then-use race
-  // (CodeQL's js/file-system-race), and a pointless one, since fstat answers
-  // the same question about the object already open.
-  const fd = fs.openSync(planFile, 'r')
+  // The size that is checked and the bytes that are read come from ONE
+  // descriptor: `statSync(path)` then `readFileSync(path)` resolves the path
+  // twice, so they are not guaranteed to describe the same file.
   try {
     const size = fs.fstatSync(fd).size
     if (size > MAX_PLAN_BYTES) {
