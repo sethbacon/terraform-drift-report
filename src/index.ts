@@ -147,7 +147,11 @@ async function run(): Promise<void> {
         { 'X-TSM-Callback-Token': callbackToken },
         JSON.stringify(body),
         createHostAuthorizer(core.getInput('callback-allowed-hosts')),
-        tlsTrust,
+        // setSecret so a proxy URL carrying `user:password@` — which arrives
+        // from the runner's environment, not from an action input, so nothing
+        // earlier in the run has masked it — is registered before the agent
+        // that could echo it in a connection error is built.
+        { ...tlsTrust, setSecret: core.setSecret },
       )
       if (resp.status < 200 || resp.status >= 300) {
         // The body is chosen by whatever host callback-url names. Pasting it

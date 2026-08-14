@@ -12,6 +12,8 @@ import { mkdtempSync, writeFileSync, readFileSync, statSync, existsSync, readdir
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { createServer } from 'node:https'
+import { createServer as createHttpServer } from 'node:http'
+import { connect as netConnect } from 'node:net'
 import { execFileSync } from 'node:child_process'
 
 const DIST = process.argv[2] ?? new URL("../dist/index.js", import.meta.url).pathname
@@ -68,6 +70,17 @@ function runAction(extraEnv) {
     'INPUT_INCLUDE-MODULE-PROVENANCE': 'false',
     'INPUT_FAIL-ON-DRIFT': 'false',
     'INPUT_DETAIL': '',
+    // The action now HONOURS these, so `...process.env` would otherwise let a
+    // developer's own shell proxy decide where every check below sends its
+    // callback — and the loopback endpoints these checks stand up are exactly
+    // what such a proxy would refuse. Cleared to a known-empty baseline; the
+    // proxy checks set them explicitly through extraEnv.
+    HTTPS_PROXY: undefined,
+    https_proxy: undefined,
+    HTTP_PROXY: undefined,
+    http_proxy: undefined,
+    NO_PROXY: undefined,
+    no_proxy: undefined,
     ...extraEnv,
   }
   // An explicit `undefined` UNSETS the variable rather than passing the string
@@ -269,6 +282,135 @@ await new Promise((resolve) => {
     server.close(resolve)
   })
 })
+// ---------------------------------------------------------------- #21 ------
+// Egress proxy. The unit suite injects both the environment and the mask sink,
+// so NEITHER of the two entrypoint wirings this depends on — that the resolver
+// defaults to `process.env`, and that `core.setSecret` is the sink — is
+// observable there. They are observable here, in the bundle the runner executes.
+//
+// A minimal forward proxy: it answers CONNECT by splicing a TCP socket to the
+// requested destination, which is the tunnel an enterprise egress proxy gives.
+function startProxy() {
+  const connects = []
+  const server = createHttpServer((_req, res) => {
+    res.writeHead(405)
+    res.end()
+  })
+  server.on('connect', (req, clientSocket, head) => {
+    connects.push(req.url ?? '')
+    const [host, port] = (req.url ?? '').split(':')
+    const upstream = netConnect(Number(port), host, () => {
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+      upstream.write(head)
+      upstream.pipe(clientSocket)
+      clientSocket.pipe(upstream)
+    })
+    upstream.on('error', () => clientSocket.destroy())
+    clientSocket.on('error', () => upstream.destroy())
+  })
+  return { server, connects }
+}
+
+// Stands up a TLS callback endpoint and a proxy in front of it, runs the action
+// against them, and hands back what each side observed.
+function withProxiedCallback(extraEnv, proxyUrlFor) {
+  return new Promise((resolve) => {
+    let received = null
+    const endpoint = createServer(TLS, (req, res) => {
+      let raw = ''
+      req.on('data', (d) => (raw += d))
+      req.on('end', () => {
+        received = raw
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{"ok":true}')
+      })
+    })
+    const { server: proxy, connects } = startProxy()
+    endpoint.listen(0, '127.0.0.1', () => {
+      proxy.listen(0, '127.0.0.1', async () => {
+        const endpointPort = endpoint.address().port
+        const proxyPort = proxy.address().port
+        const r = await runAction({
+          'INPUT_CALLBACK-URL': `https://127.0.0.1:${endpointPort}/cb`,
+          'INPUT_CALLBACK-TOKEN': 'tok',
+          'INPUT_CALLBACK-ALLOWED-HOSTS': '127.0.0.1',
+          'INPUT_CA-CERT': CA,
+          HTTPS_PROXY: proxyUrlFor(proxyPort),
+          ...extraEnv,
+        })
+        endpoint.close(() => proxy.close(() => resolve({ r, received, connects, endpointPort })))
+      })
+    })
+  })
+}
+
+console.log('\n=== #21  the callback honours the runner proxy from its own environment ===')
+{
+  const { r, received, connects, endpointPort } = await withProxiedCallback({}, (p) => `http://127.0.0.1:${p}`)
+  const all = r.stdout + r.stderr
+  // The load-bearing one. Both servers are on loopback, so a bundle that
+  // ignored HTTPS_PROXY entirely would ALSO deliver the callback and pass every
+  // other assertion here — the tunnel record is the only thing that separates
+  // "through the chokepoint" from "around it".
+  check(
+    'the proxy saw a CONNECT to the callback destination',
+    connects.length === 1 && connects[0] === `127.0.0.1:${endpointPort}`,
+    JSON.stringify(connects),
+  )
+  check('the callback still arrived through the tunnel', received !== null, all.slice(0, 300))
+  check('the step succeeded', !/::error::/.test(all), all.split('\n').filter((l) => l.startsWith('::error::')).join(' | '))
+}
+
+console.log('\n=== #21  NO_PROXY is honoured from the runner environment ===')
+{
+  const { r, received, connects } = await withProxiedCallback(
+    { NO_PROXY: '127.0.0.1' },
+    (p) => `http://127.0.0.1:${p}`,
+  )
+  check('the proxy was never dialled', connects.length === 0, JSON.stringify(connects))
+  check('the callback went direct and arrived', received !== null, (r.stdout + r.stderr).slice(0, 300))
+}
+
+console.log('\n=== #21  a proxy credential reaches the job mask ===')
+{
+  // The proxy URL arrives from the ENVIRONMENT, not from an action input, so
+  // nothing earlier in the run has masked it. This is the only layer that can
+  // observe `core.setSecret` actually being the sink.
+  const { r, connects } = await withProxiedCallback({}, (p) => `http://bob:hunter2@127.0.0.1:${p}`)
+  check('::add-mask:: emitted for the proxy password', r.stdout.includes('::add-mask::hunter2'), r.stdout.split('\n').filter((l) => l.includes('add-mask')).join(' | ') || '(no mask line)')
+  check('the credentialed proxy still carried the callback', connects.length === 1, JSON.stringify(connects))
+}
+
+console.log('\n=== #21  a proxy is not a way around egress authorization ===')
+{
+  // The destination is refused by callback-allowed-hosts, and a configured
+  // proxy must not change that: a CONNECT tunnel to an unauthorized host is
+  // still unauthorized egress. Allowing the PROXY host is the laundering
+  // attempt — 127.0.0.1 names the proxy here too, so the allowlist below
+  // permits it and the destination is refused all the same.
+  const { r, received, connects } = await withProxiedCallback(
+    { 'INPUT_CALLBACK-ALLOWED-HOSTS': 'tsm.example.com' },
+    (p) => `http://127.0.0.1:${p}`,
+  )
+  const all = r.stdout + r.stderr
+  check('the step failed', /::error::/.test(all), all.slice(0, 200))
+  check('the refusal names the destination and the input', /127\.0\.0\.1.*callback-allowed-hosts/.test(all), all.split('\n').find((l) => l.startsWith('::error::')) ?? '(no error line)')
+  check('nothing was tunnelled', connects.length === 0, JSON.stringify(connects))
+  check('the callback token never left the runner', received === null, 'the endpoint received a request')
+}
+
+console.log('\n=== #21  an unusable proxy variable fails closed rather than going direct ===')
+{
+  const { r, received, connects } = await withProxiedCallback({}, () => 'not a url')
+  const all = r.stdout + r.stderr
+  const errLine = all.split('\n').find((l) => l.startsWith('::error::')) ?? ''
+  check('the step failed', /::error::/.test(all), all.slice(0, 200))
+  check('the refusal names the variable', /HTTPS_PROXY/.test(errLine), errLine || '(no error line)')
+  check('the variable value is never echoed', !/not a url/.test(all), errLine)
+  check('the callback did NOT quietly go direct', received === null, 'the endpoint received a request')
+  check('and nothing was tunnelled either', connects.length === 0, JSON.stringify(connects))
+}
+
 // ------------------------------------------------------- post entrypoint ----
 // Everything above drives dist/index.js. dist/cleanup.js is the other half of
 // what consumers execute and had no coverage of any kind: `npm test` exercises

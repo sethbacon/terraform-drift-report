@@ -126,6 +126,55 @@ bare `fetch failed`, because the reason decides the fix:
 is missing or wrong, while `ERR_TLS_CERT_ALTNAME_INVALID` means the certificate
 does not name the host you pointed at.
 
+## Proxy support
+
+On a self-hosted runner behind a mandatory egress proxy, the callback is routed
+through it. The action reads the variables the runner already sets — in both
+spellings, lowercase winning:
+
+| Variable                      | Effect                                                     |
+| ----------------------------- | ---------------------------------------------------------- |
+| `HTTPS_PROXY` / `https_proxy` | Proxy for the `https://` callback.                          |
+| `HTTP_PROXY` / `http_proxy`   | Read only for an `http://` destination, which this action refuses anyway. |
+| `NO_PROXY` / `no_proxy`       | Comma-separated hosts to reach directly. `*` disables proxying entirely. Entries may carry a port, and a leading `.` matches subdomains. |
+
+Nothing needs configuring in the workflow — if the variables are set, they are
+honoured. Node's `fetch` honours none of them on its own, which is why the
+callback previously went around the chokepoint: it is the one outbound request
+in this action that carries a credential and the plan contents, and so the one
+request an organisation most needs inside its own allowlist and audit trail.
+
+**A proxy does not widen `callback-allowed-hosts`.** The egress decision is
+about the **destination**, and it is unchanged by how the packets get there — a
+CONNECT tunnel to an unauthorized host is still unauthorized egress. Allowing
+the proxy's own host does not launder a destination that is not allowed. The
+decision is applied to the initial destination and re-applied to every redirect
+hop; the proxy is never its subject.
+
+The proxy is also resolved **per hop, not once per run**, because `NO_PROXY` is
+matched against the destination: a callback that redirects from a public host to
+an internal one covered by `NO_PROXY` leaves the proxy behind at that hop, and
+one that redirects the other way picks it up.
+
+A proxy URL may embed credentials (`https://user:pass@proxy.example.com:3128`).
+Those arrive from the environment rather than from an action input, so the
+action registers them with the job's mask itself before making any connection.
+
+If a proxy variable is set but unusable, the step **fails** rather than quietly
+going direct — going direct is exactly the failure the variable exists to
+prevent. The message names the variable and never echoes its value, which may
+carry a password.
+
+Private CAs compose with proxying: `ca-cert` is the trust anchor for the
+handshake with the **callback endpoint**, inside the tunnel, so a TLS-inspecting
+proxy's CA belongs there too (or in `NODE_EXTRA_CA_CERTS`).
+
+> One caveat worth stating rather than discovering: with `callback-allowed-hosts`
+> empty, the default-deny check resolves DNS **on the runner**, while a proxied
+> connection is resolved **at the proxy** — so the two can disagree about what a
+> name points at. Setting `callback-allowed-hosts` is a decision about the name
+> and is unaffected; it is the recommended configuration behind a proxy.
+
 ## Module provenance
 
 With `include-module-provenance: true` (the default) the report carries two
