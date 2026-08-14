@@ -16,6 +16,7 @@ const calls: string[] = []
 const inputs = new Map<string, string>()
 const outputs = new Map<string, string>()
 const warnings: string[] = []
+const infos: string[] = []
 const failures: string[] = []
 
 vi.mock('@actions/core', () => ({
@@ -26,7 +27,10 @@ vi.mock('@actions/core', () => ({
     outputs.set(name, value)
   },
   saveState: () => undefined,
-  info: () => calls.push('info'),
+  info: (message: string) => {
+    infos.push(message)
+    calls.push('info')
+  },
   debug: () => calls.push('debug'),
   warning: (message: string) => {
     warnings.push(message)
@@ -76,6 +80,7 @@ async function runAction(): Promise<void> {
 beforeEach(() => {
   calls.length = 0
   warnings.length = 0
+  infos.length = 0
   failures.length = 0
   inputs.clear()
   outputs.clear()
@@ -250,5 +255,43 @@ describe('run: diagnostics name the stage that failed', () => {
     const body = JSON.parse(fs.readFileSync(outputs.get('summary-file') as string, 'utf8')) as Record<string, unknown>
     expect(body.module_locks).toBeNull()
     expect(warnings).toEqual([])
+  })
+})
+
+describe('run: no plan-derived text reaches an unescaped log sink', () => {
+  // core.info is a bare process.stdout.write with no escaping at all, unlike
+  // warning/error/setFailed, which route through issueCommand's escapeData. The
+  // margin is thin rather than absent: both call sites interpolate numbers
+  // today, so a future change that logs a resource address or an attribute
+  // value would hand the runner's command parser an attacker-authored line.
+  it('a hostile address and attribute value stay out of every core.info line', async () => {
+    const hostile = '::error::forged\n::add-mask::x'
+    inputs.set(
+      'plan-json-file',
+      planAt(
+        JSON.stringify({
+          resource_changes: [
+            {
+              address: hostile,
+              change: { actions: ['update'], before: { k: hostile }, after: { k: hostile + '2' } },
+            },
+          ],
+        }),
+      ),
+    )
+    await runAction()
+
+    expect(failures).toEqual([])
+    expect(infos.length).toBeGreaterThan(0)
+    for (const line of infos) {
+      expect(line).not.toContain('::')
+      expect(line).not.toContain('\n')
+    }
+    // It IS in the report — that is the action's purpose — so the assertion
+    // above is about the log sink, not about dropping the data.
+    const body = JSON.parse(fs.readFileSync(outputs.get('summary-file') as string, 'utf8')) as {
+      summary: { address: string }[]
+    }
+    expect(body.summary[0].address).toBe(hostile)
   })
 })

@@ -20,11 +20,7 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: npm run lint
-      # --coverage, with thresholds in vitest.config.mts. The two files carrying
-      # the real risk — the orchestration in index.ts and the credential-bearing
-      # transport in callback.ts — were at 0% for most of this action's life,
-      # and nothing in CI would have said so.
-      - run: npm run test:coverage
+      - run: npm test
       # Drives the REBUILT, MINIFIED bundle and observes what it does. --minify
       # strips names, so nothing about dist/ can be proven by reading it.
       - name: Behaviour of the built bundle

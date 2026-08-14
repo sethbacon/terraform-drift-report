@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "scripts": {
     "build": "ncc build src/index.ts -o dist --minify --no-source-map-register && ncc build src/cleanup.ts -o dist/cleanup-build --minify --no-source-map-register && mv dist/cleanup-build/index.js dist/cleanup.js && rm -rf dist/cleanup-build",
-    "test": "vitest run",
+    "test": "vitest run --coverage",
     "lint": "tsc --noEmit",
     "test:dist": "node scripts/dist-behaviour.mjs",
     "test:coverage": "vitest run --coverage"
