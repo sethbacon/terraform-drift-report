@@ -55,7 +55,14 @@ vi.mock('../src/callback', async (importOriginal) => {
 })
 
 let workspace: string
-const saved = { ws: process.env.GITHUB_WORKSPACE, tmp: process.env.RUNNER_TEMP }
+const saved = {
+  ws: process.env.GITHUB_WORKSPACE,
+  tmp: process.env.RUNNER_TEMP,
+  // These tests run ON a GitHub runner, which exports a real GITHUB_SHA. Left
+  // in place it would leak into every case as an incidental commit_sha, so it
+  // is cleared per test and each case sets what it means to assert about.
+  sha: process.env.GITHUB_SHA,
+}
 
 const PLAN = JSON.stringify({
   resource_changes: [
@@ -90,12 +97,15 @@ beforeEach(() => {
   process.env.GITHUB_WORKSPACE = workspace
   process.env.RUNNER_TEMP = path.join(workspace, '_temp')
   fs.mkdirSync(process.env.RUNNER_TEMP, { recursive: true })
+  delete process.env.GITHUB_SHA
   inputs.set('include-module-provenance', 'false')
 })
 
 afterEach(() => {
   process.env.GITHUB_WORKSPACE = saved.ws
   process.env.RUNNER_TEMP = saved.tmp
+  if (saved.sha === undefined) delete process.env.GITHUB_SHA
+  else process.env.GITHUB_SHA = saved.sha
   fs.rmSync(workspace, { recursive: true, force: true })
 })
 
@@ -130,6 +140,70 @@ describe('run: happy path', () => {
     inputs.set('fail-on-drift', 'true')
     await runAction()
     expect(failures[0]).toMatch(/Drift detected: 2 changed resource/)
+  })
+})
+
+// Nothing tied a report to the tree it described: the payload carried counts, a
+// summary and a free-text detail, so two reports for the same state were ordered
+// only by arrival time and a re-run on an older commit read as the current
+// state. These assert the binding exists, defaults itself, and stays absent
+// rather than empty when there is genuinely nothing to bind to.
+describe('run: the report is bound to the commit it was computed from', () => {
+  const SHA = '2fd4e1c67a2d28fced849ee1bb76e7391b93eb12'
+
+  function reportBody(): Record<string, unknown> {
+    return JSON.parse(fs.readFileSync(outputs.get('summary-file') as string, 'utf8'))
+  }
+
+  it('defaults commit_sha to the commit the workflow ran on', async () => {
+    process.env.GITHUB_SHA = SHA
+    inputs.set('plan-json-file', planAt())
+    await runAction()
+
+    expect(failures).toEqual([])
+    expect(reportBody().commit_sha).toBe(SHA)
+  })
+
+  it('an explicit commit-sha input wins over GITHUB_SHA', async () => {
+    const EXPLICIT = '9f1c0de5b8a74e2d3c6b1a0f4e7d8c9b0a1b2c3d'
+    process.env.GITHUB_SHA = SHA
+    inputs.set('commit-sha', EXPLICIT)
+    inputs.set('plan-json-file', planAt())
+    await runAction()
+
+    expect(reportBody().commit_sha).toBe(EXPLICIT)
+  })
+
+  // Absent, not empty. A receiver has to be able to tell "this runner had no
+  // commit" from "an older action that never sent one", and `commit_sha: ""`
+  // reads as the former while meaning neither.
+  it('omits commit_sha entirely when there is no commit to report', async () => {
+    inputs.set('plan-json-file', planAt())
+    await runAction()
+
+    const body = reportBody()
+    expect(body.commit_sha).toBeUndefined()
+    expect(Object.keys(body)).not.toContain('commit_sha')
+  })
+
+  // The report file is documented as "the exact callback body". Asserting the
+  // field in the file alone would pass on a refactor that assembled the POST
+  // separately and dropped it.
+  it('the POSTed body carries the same commit_sha as the report file', async () => {
+    process.env.GITHUB_SHA = SHA
+    inputs.set('plan-json-file', planAt())
+    inputs.set('callback-url', 'https://tsm.example.com/drift')
+    inputs.set('callback-token', 'tsm_TOKEN')
+    await runAction()
+
+    expect(failures).toEqual([])
+    expect(postJson).toHaveBeenCalledTimes(1)
+    // The mock is declared with no parameters, so its recorded call is typed as
+    // an empty tuple; the real call is postJson(url, headers, body, ...).
+    const args = postJson.mock.calls[0] as unknown as unknown[]
+    const posted = JSON.parse(args[2] as string)
+    expect(posted.commit_sha).toBe(SHA)
+    expect(posted.commit_sha).toBe(reportBody().commit_sha)
   })
 })
 

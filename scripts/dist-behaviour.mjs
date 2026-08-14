@@ -59,22 +59,27 @@ function runAction(extraEnv) {
   const stateFile = join(runnerTemp, 'gh_state')
   writeFileSync(outFile, '')
   writeFileSync(stateFile, '')
+  const env = {
+    ...process.env,
+    RUNNER_TEMP: runnerTemp,
+    GITHUB_OUTPUT: outFile,
+    GITHUB_STATE: stateFile,
+    'INPUT_PLAN-JSON-FILE': planFile,
+    'INPUT_INCLUDE-MODULE-PROVENANCE': 'false',
+    'INPUT_FAIL-ON-DRIFT': 'false',
+    'INPUT_DETAIL': '',
+    ...extraEnv,
+  }
+  // An explicit `undefined` UNSETS the variable rather than passing the string
+  // "undefined". This harness runs on a GitHub runner, which exports a real
+  // GITHUB_SHA that `...process.env` would otherwise smuggle into every run —
+  // and "the action sends no commit when it has none" is not observable if the
+  // environment always has one.
+  for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k]
   return new Promise((resolve) => {
     let stdout = ''
     let stderr = ''
-    const child = spawn(process.execPath, [DIST], {
-      env: {
-        ...process.env,
-        RUNNER_TEMP: runnerTemp,
-        GITHUB_OUTPUT: outFile,
-        GITHUB_STATE: stateFile,
-        'INPUT_PLAN-JSON-FILE': planFile,
-        'INPUT_INCLUDE-MODULE-PROVENANCE': 'false',
-        'INPUT_FAIL-ON-DRIFT': 'false',
-        'INPUT_DETAIL': '',
-        ...extraEnv,
-      },
-    })
+    const child = spawn(process.execPath, [DIST], { env })
     child.stdout.on('data', (d) => (stdout += d))
     child.stderr.on('data', (d) => (stderr += d))
     child.on('close', () =>
@@ -210,6 +215,60 @@ await new Promise((resolve) => {
   })
 })
 
+// ---------------------------------------------------------------- #46 ------
+// Provenance. The callback payload carried no commit at all, so a receiver
+// storing these reports as a time series had counts and a summary but no way to
+// say which commit's plan produced them. Asserted against the report file AND
+// the bytes that actually leave the runner: the file is documented as the exact
+// callback body, and a refactor that assembled the POST separately would keep
+// the file right and send the wrong thing.
+const SHA = '2fd4e1c67a2d28fced849ee1bb76e7391b93eb12'
+const reportOf = (r) => JSON.parse(readFileSync(r.output.match(/summary-file<<\S+\n(.+)\n/)[1], 'utf8'))
+
+console.log('\n=== #46  the report is bound to the commit it was computed from ===')
+{
+  const r = await runAction({ GITHUB_SHA: SHA })
+  check('commit_sha defaults to the runner GITHUB_SHA', reportOf(r).commit_sha === SHA, JSON.stringify(reportOf(r).commit_sha))
+
+  const EXPLICIT = '9f1c0de5b8a74e2d3c6b1a0f4e7d8c9b0a1b2c3d'
+  const e = await runAction({ GITHUB_SHA: SHA, 'INPUT_COMMIT-SHA': EXPLICIT })
+  check('an explicit commit-sha input wins over GITHUB_SHA', reportOf(e).commit_sha === EXPLICIT, JSON.stringify(reportOf(e).commit_sha))
+
+  // Absent, not empty: a receiver has to tell "no commit available" from "an
+  // older action that never sent one", and "" reads as neither.
+  const none = await runAction({ GITHUB_SHA: undefined })
+  const body = reportOf(none)
+  check('commit_sha is omitted entirely when there is no commit', !('commit_sha' in body), JSON.stringify(body.commit_sha))
+}
+
+console.log('\n=== #46  the commit reaches the callback, not just the local report ===')
+await new Promise((resolve) => {
+  let received = null
+  const server = createServer(TLS, (req, res) => {
+    let raw = ''
+    req.on('data', (d) => (raw += d))
+    req.on('end', () => {
+      received = raw
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"ok":true}')
+    })
+  })
+  server.listen(0, '127.0.0.1', async () => {
+    const port = server.address().port
+    const r = await runAction({
+      GITHUB_SHA: SHA,
+      'INPUT_CALLBACK-URL': `https://127.0.0.1:${port}/cb`,
+      'INPUT_CALLBACK-TOKEN': 'tok',
+      'INPUT_CALLBACK-ALLOWED-HOSTS': '127.0.0.1',
+      'INPUT_CA-CERT': CA,
+    })
+    check('the callback was actually issued', received !== null, r.stdout + r.stderr)
+    const posted = received ? JSON.parse(received) : {}
+    check('the POSTed body carries commit_sha', posted.commit_sha === SHA, JSON.stringify(posted.commit_sha))
+    check('it matches the report file byte for byte', posted.commit_sha === reportOf(r).commit_sha, `${posted.commit_sha} vs ${reportOf(r).commit_sha}`)
+    server.close(resolve)
+  })
+})
 // ------------------------------------------------------- post entrypoint ----
 // Everything above drives dist/index.js. dist/cleanup.js is the other half of
 // what consumers execute and had no coverage of any kind: `npm test` exercises

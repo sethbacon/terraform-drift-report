@@ -23,6 +23,16 @@ export interface CallbackBody {
   drifted: boolean
   summary: ReturnType<typeof summarize>['summary']
   detail: string
+  /**
+   * The commit the plan was computed from. Omitted rather than sent empty, so a
+   * receiver can tell "this runner had no commit to report" from "an older
+   * action that never sent one" — the two need different answers, and a bare
+   * `""` collapses them.
+   *
+   * snake_case to match the rest of this body and the fields TSM already
+   * stores (`external_ref`, `state_key`, `module_locks`).
+   */
+  commit_sha?: string
   /** Module provenance; present only with include-module-provenance. */
   plan?: unknown
   module_locks?: unknown
@@ -75,6 +85,16 @@ async function run(): Promise<void> {
     const includeProvenance = core.getBooleanInput('include-module-provenance')
     const detail = core.getInput('detail')
 
+    // Falls back to the commit the workflow is running on rather than staying
+    // empty. Drift reports are consumed as a time series, and until now the
+    // payload carried no commit at all — so two reports for the same state were
+    // ordered only by arrival time, a re-run against an older commit landed
+    // after a newer one and read as current, and no report could be re-derived
+    // against the tree it described. GITHUB_SHA is set by the runner for every
+    // event, so the binding is present by default; an operator whose plan comes
+    // from a different commit still overrides it.
+    const commitSha = core.getInput('commit-sha') || process.env.GITHUB_SHA || ''
+
     const body: CallbackBody = {
       status: 'completed',
       added: result.added,
@@ -84,6 +104,7 @@ async function run(): Promise<void> {
       summary: result.summary,
       detail,
     }
+    if (commitSha) body.commit_sha = commitSha
     if (includeProvenance) {
       body.plan = moduleCallsPlan(plan)
       // No `|| '.terraform/modules/modules.json'` fallback: action.yml already
