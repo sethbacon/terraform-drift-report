@@ -5,7 +5,28 @@ import { truncateForLog } from '@4cloudguru/pipeline-task-core'
 import { describeError, postJson, resolveTlsTrust } from './callback'
 import { createHostAuthorizer } from './egress'
 import { readModuleLocks } from './module-locks'
+import { readPlanFile } from './plan-file'
 import { writeReport } from './report-file'
+
+/**
+ * The wire contract with TSM. It was assembled as a bare
+ * `Record<string, unknown>`, so `tsc --noEmit` — the repo's whole "lint" —
+ * could not catch a typo'd key, a wrong field type or a field dropped in a
+ * refactor. The only thing that would notice was the backend, at run time, on
+ * the one payload that leaves the runner with a credential attached.
+ */
+export interface CallbackBody {
+  status: string
+  added: number
+  changed: number
+  destroyed: number
+  drifted: boolean
+  summary: ReturnType<typeof summarize>['summary']
+  detail: string
+  /** Module provenance; present only with include-module-provenance. */
+  plan?: unknown
+  module_locks?: unknown
+}
 
 async function run(): Promise<void> {
   try {
@@ -30,14 +51,31 @@ async function run(): Promise<void> {
       )
     }
 
-    const plan = JSON.parse(fs.readFileSync(planFile, 'utf8')) as Plan
-    const result = summarize(plan)
+    // Named stages. Everything in run() funnels into one catch, so a malformed
+    // plan used to surface as a bare `Unexpected token } in JSON at position 42`
+    // with no mention of which file, which stage, or that the file even was the
+    // problem — strictly less than the not-found branch three lines above gives.
+    let plan: Plan
+    try {
+      plan = JSON.parse(readPlanFile(planFile)) as Plan
+    } catch (error) {
+      throw new Error(`Failed to read plan JSON at ${planFile}: ${describeError(error)}`)
+    }
+    // `summarize` normalises every field it reads, so it does not throw on a
+    // malformed document — but it is a separate stage and a future contract
+    // version could, and "which stage" is the whole point of this shape.
+    let result: ReturnType<typeof summarize>
+    try {
+      result = summarize(plan)
+    } catch (error) {
+      throw new Error(`Failed to summarize the plan at ${planFile}: ${describeError(error)}`)
+    }
 
     // Always emit outputs + a JSON artifact, even with no callback configured.
     const includeProvenance = core.getBooleanInput('include-module-provenance')
     const detail = core.getInput('detail')
 
-    const body: Record<string, unknown> = {
+    const body: CallbackBody = {
       status: 'completed',
       added: result.added,
       changed: result.changed,
@@ -48,7 +86,20 @@ async function run(): Promise<void> {
     }
     if (includeProvenance) {
       body.plan = moduleCallsPlan(plan)
-      body.module_locks = readModuleLocks(core.getInput('module-manifest') || '.terraform/modules/modules.json')
+      // No `|| '.terraform/modules/modules.json'` fallback: action.yml already
+      // declares that default, so the fallback was unreachable under the
+      // documented contract — and it overrode the ONE case where an empty value
+      // is meaningful, an author passing `module-manifest: ""` to opt out. An
+      // empty path simply finds no manifest and yields null, which is the
+      // documented "absent" behaviour.
+      //
+      // "Absent" and "present but unreadable" used to collapse onto the same
+      // silent null, so a mistyped path or a corrupt manifest dropped provenance
+      // with no signal at all — noticed, if ever, as a missing field in the
+      // callback body long afterwards.
+      body.module_locks = readModuleLocks(core.getInput('module-manifest'), (message) =>
+        core.warning(`module-manifest: ${message} Module provenance will omit locked versions.`),
+      )
     }
 
     const summaryFile = writeReport(body)

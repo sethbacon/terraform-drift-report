@@ -30,9 +30,19 @@ works) and your cloud's first-party OIDC auth action.
 
 | Output | Notes |
 |--------|-------|
-| `drifted` | `"true"` when any non-no-op, non-read change was planned |
+| `drifted` | the **string** `"true"` or `"false"` — see the note below |
 | `added` / `changed` / `destroyed` | resource counts (replacement counts as add **and** destroy) |
 | `summary-file` | path to the JSON report (the exact callback body) |
+
+> **`drifted` is a string, and `if:` treats every non-empty string as true.**
+> `if: steps.drift.outputs.drifted` runs the step even when the value is the
+> literal `"false"`, because GitHub Actions has no boolean output type. Compare
+> explicitly:
+>
+> ```yaml
+> - if: steps.drift.outputs.drifted == 'true'
+>   run: echo "drift!"
+> ```
 
 ## Example
 
@@ -126,6 +136,9 @@ world-readable temp file:
   `version_constraint`. Every literal argument (`expressions[*].constant_value`,
   where a hardcoded password written in `.tf` would sit) and the recursive
   `module` subtree are dropped by construction.
+  **The body key is `plan`, not `module_calls`**: the calls sit at
+  `plan.configuration.root_module.module_calls`. Anything reading `summary-file`
+  or the callback body should look there.
 - **`module_locks`** — per entry of `.terraform/modules/modules.json`, only
   `Key`, `Source` and `Version`. `Dir` (the runner-local checkout path) and any
   field Terraform adds later are dropped.
@@ -146,9 +159,44 @@ drift apart.
 
 ## Contract
 
-The count/summary semantics match the TSM backend's `driftingest` package
-exactly; the test fixtures are vendored from the backend so they cannot diverge.
-See the repo README ("Contract").
+The count/summary semantics are defined by
+[`@4cloudguru/terraform-drift-contract`](https://github.com/4cloudguru/terraform-drift-contract)
+and mirrored by the TSM backend's Go `driftingest` package. That package's
+[README, "Contract" section](https://github.com/4cloudguru/terraform-drift-contract#contract)
+is the authority — including its statement that parity with the Go and jq
+mirrors is checked **by hand**, with no shared fixture set and no conformance
+run. (An earlier revision of this section said "see the repo README", which read
+as a self-reference; it meant the dependency's README, and said so nowhere.)
+
+## What ends up in the report, and where it goes
+
+Worth stating plainly, because the docs above describe the mechanics and not the
+consequences:
+
+- **Changed attribute values are forwarded in cleartext unless Terraform marked
+  them sensitive.** Redaction follows the plan's `before_sensitive` /
+  `after_sensitive` maps and nothing else, so attributes providers routinely
+  leave unmarked — EC2 `user_data`, container `env` blocks, ConfigMap and tag
+  values, connection strings — are emitted, up to 300 code points each, for
+  every in-place update or replacement. A plan carrying neither sensitivity map
+  gets no masking at all. Treat the callback endpoint as a recipient of that
+  data.
+- **The report file is the exact callback body.** It is written under
+  `$RUNNER_TEMP` in a `mkdtemp` directory with mode `0600` and removed by the
+  action's `post:` step, so it does not outlive the job — but its path is
+  published as the `summary-file` output, and any later step in the same job can
+  read it.
+- **`callback-url` receives the token wherever it points.** The egress guard
+  above refuses private, link-local and reserved destinations by default, and
+  `callback-allowed-hosts` is how you narrow it further. Credentials embedded in
+  the URL (`https://user:pass@host/`) are **refused**, not silently dropped:
+  `fetch` never sends them, so accepting them would mean discarding an
+  operator's credential without a word. Authenticate with `callback-token`.
+- **`plan-json-file` is read with two guards.** A symlink whose target escapes
+  both `GITHUB_WORKSPACE` and `RUNNER_TEMP` is refused — on a fork PR the
+  checkout is attacker-influenced, and following such a link would put an
+  unrelated file into the report and the POST body — and a plan above 256 MiB is
+  refused rather than parsed and serialised twice in memory.
 
 ## Pinning this action
 
