@@ -64,9 +64,14 @@ jobs:
       # The whole point of the tag trigger: prove the committed bundle at THIS
       # ref is the one a build of this ref produces.
       - name: Fail if the committed dist is stale at the tag
+        # Staged-then-diffed for the same reason as ci.yml: a plain `git diff`
+        # sees tracked content only, so a file the build newly emits into dist/
+        # is invisible to it and this gate would certify a bundle missing a
+        # module it requires.
         run: |
           npm run build
-          if ! git diff --exit-code -- dist; then
+          git add --force -A -- dist
+          if ! git diff --cached --exit-code -- dist; then
             echo "::error::dist/ at this tag does not match a fresh build. Refusing to release a bundle that was never verified."
             exit 1
           fi
@@ -131,3 +136,14 @@ jobs:
             gh api -X POST "repos/$REPO/git/refs" -f ref="refs/tags/$MAJOR" -f sha="$SHA"
           fi
           echo "Moved $MAJOR -> $SHA"
+
+          # Read the alias back. `v1` is what almost every consumer resolves, so
+          # "the release succeeded but the alias did not move" is the failure
+          # that matters most and the one nothing here would otherwise notice —
+          # it is how v1 sat two commits behind main on a removed Node runtime.
+          MOVED="$(gh api "repos/$REPO/git/ref/tags/$MAJOR" --jq .object.sha)"
+          if [ "$MOVED" != "$SHA" ]; then
+            echo "::error::$MAJOR still points at $MOVED, not the released commit $SHA. Consumers pinned to @$MAJOR would keep running the old bundle."
+            exit 1
+          fi
+          echo "Verified $MAJOR -> $MOVED"
