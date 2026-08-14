@@ -15,6 +15,14 @@ import { createServer } from 'node:https'
 import { execFileSync } from 'node:child_process'
 
 const DIST = process.argv[2] ?? new URL("../dist/index.js", import.meta.url).pathname
+// action.yml declares TWO entrypoints — `main: dist/index.js` and
+// `post: dist/cleanup.js` — and only the first was ever executed here. The post
+// step is the one that deletes a report full of unredacted attribute values, so
+// "it silently stopped working" is not a cosmetic failure. It is also the entry
+// point that degrades most quietly: ncc emits a `webpackMissingModule` stub
+// rather than failing, and on the @actions/core 3.x bump this bundle collapses
+// from 498 KB to 1.8 KB while `npm run build` still exits 0.
+const CLEANUP = process.argv[3] ?? join(dirname(DIST), 'cleanup.js')
 const work = mkdtempSync(join(tmpdir(), 'distproof-'))
 
 // A real TLS endpoint, because the action refuses anything but https:// and the
@@ -78,6 +86,20 @@ function runAction(extraEnv) {
         state: readFileSync(stateFile, 'utf8'),
       }),
     )
+  })
+}
+
+// The post entrypoint, driven the way the runner drives it: `core.getState(k)`
+// reads `STATE_<k>` from the environment, which is how the main step's saved
+// path reaches this process.
+function runCleanup(state) {
+  return new Promise((resolve) => {
+    let stdout = ''
+    let stderr = ''
+    const child = spawn(process.execPath, [CLEANUP], { env: { ...process.env, ...state } })
+    child.stdout.on('data', (d) => (stdout += d))
+    child.stderr.on('data', (d) => (stderr += d))
+    child.on('close', (code) => resolve({ code, stdout, stderr }))
   })
 }
 
@@ -187,6 +209,47 @@ await new Promise((resolve) => {
     server.close(resolve)
   })
 })
+
+// ------------------------------------------------------- post entrypoint ----
+// Everything above drives dist/index.js. dist/cleanup.js is the other half of
+// what consumers execute and had no coverage of any kind: `npm test` exercises
+// src/cleanup.ts, and the staleness gates only prove the bundle matches a build
+// of itself — which a stub satisfies byte-for-byte.
+console.log('\n=== the post step runs and removes the report ===')
+{
+  // The real flow: the main step writes the report and saves its path, exactly
+  // as the runner carries it into the post step.
+  const r = await runAction({})
+  const file = r.output.match(/summary-file<<\S+\n(.+)\n/)?.[1]
+  const dir = file ? dirname(file) : null
+  check('the main step left a report for the post step to remove', !!file && existsSync(file), String(file))
+
+  const c = await runCleanup({ 'STATE_summary-file': file ?? '' })
+  // Positive observation paired with the negative one, per the rule this file
+  // follows: "the report is gone" is also true of a bundle that threw on
+  // require and never deleted anything, so the exit status is asserted too.
+  check('dist/cleanup.js exits 0', c.code === 0, `exit ${c.code}: ${c.stderr.slice(0, 300)}`)
+  check('the report file is gone', !!file && !existsSync(file), `${file} is still present`)
+  check(
+    'the whole mkdtemp directory goes, not just the file',
+    !!dir && !existsSync(dir),
+    `${dir} is still present`,
+  )
+}
+
+console.log('\n=== the post step is a no-op when the main step saved nothing ===')
+{
+  const c = await runCleanup({})
+  check('exits 0 with no summary-file state', c.code === 0, `exit ${c.code}: ${c.stderr.slice(0, 300)}`)
+}
+
+console.log('\n=== a cleanup failure never fails the job ===')
+{
+  // Best-effort by contract. An already-removed report is what a re-run of the
+  // post step, or a runner that cleared RUNNER_TEMP first, looks like.
+  const c = await runCleanup({ 'STATE_summary-file': join(work, 'no-such-dir', 'tsm-drift-report.json') })
+  check('exits 0 when the report is already gone', c.code === 0, `exit ${c.code}: ${c.stderr.slice(0, 300)}`)
+}
 
 console.log(`\n${failures === 0 ? 'ALL DIST CHECKS PASSED' : failures + ' DIST CHECK(S) FAILED'}`)
 process.exit(failures === 0 ? 0 : 1)
