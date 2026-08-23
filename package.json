@@ -10,6 +10,7 @@
     "test": "vitest run --coverage",
     "lint": "tsc --noEmit",
     "test:dist": "node scripts/dist-behaviour.mjs",
+    "test:advisory": "node scripts/test-dependabot-advisory.mjs",
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
