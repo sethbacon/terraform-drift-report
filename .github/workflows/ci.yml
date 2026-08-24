@@ -51,11 +51,6 @@ jobs:
       # npm's exact wording -- which will change without telling anyone here.
       - name: The Dependabot advisory still matches npm's wording
         run: npm run test:advisory
-      # Drives the REBUILT, MINIFIED bundle and observes what it does. --minify
-      # strips names, so nothing about dist/ can be proven by reading it.
-      - name: Behaviour of the built bundle
-        run: npm run test:dist
-
       # Split from the staleness diff below so the two failures stay tellable
       # apart. "This bundle cannot be built at all" and "this bundle is fine but
       # the committed copy is behind it" need opposite responses, and collapsing
@@ -72,6 +67,19 @@ jobs:
       - name: Rebuild the bundle
         id: rebuild
         run: npm run build
+
+      # Drives the REBUILT, MINIFIED bundle and observes what it does. --minify
+      # strips names, so nothing about dist/ can be proven by reading it.
+      #
+      # Sequenced immediately after the build, and BEFORE the staleness diff, so
+      # it drives the bundle that build just produced on every run — including
+      # the runs where dist/ is stale, which is precisely when someone is
+      # deciding whether to commit a rebuild. Ahead of the build it executed the
+      # COMMITTED bundle instead: on a dependency bump the old bundle passed,
+      # the freshly built one was executed by nothing, and the advisory below
+      # then told a maintainer to commit exactly that unexecuted bundle.
+      - name: Behaviour of the built bundle
+        run: npm run test:dist
 
       - name: Fail if the committed dist is stale
         id: dist-sync
