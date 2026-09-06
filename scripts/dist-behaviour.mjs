@@ -586,6 +586,78 @@ console.log('\n=== completeness markers reach the wire ===')
     MARKERS.every((m) => m in (capped.posted ?? {})),
     JSON.stringify(Object.keys(capped.posted ?? {})),
   )
+
+  // ------------------------------------------ infra-drift fields (1.4.0) ----
+  // Contract 1.4.0 adds `resource_drift` (infra drift, e.g. hand-edits) on the
+  // input side and drift_added/drift_changed/drift_destroyed/drift_summary on
+  // the output side, alongside added/changed/destroyed/summary computed from
+  // resource_changes (unapplied config changes). Driven against the same
+  // REBUILT, MINIFIED bundle and reusing planWith/postedFor above, for the
+  // same reason: --minify means nothing about whether these fields survive
+  // bundling can be established by reading dist/index.js.
+  console.log('\n=== infra-drift fields reach the wire (contract 1.4.0) ===')
+  const DRIFT_ONLY = {
+    resource_changes: [],
+    resource_drift: [
+      { address: 'aws_instance.drifted', change: { actions: ['update'], before: { size: 1 }, after: { size: 2 } } },
+    ],
+  }
+  const DRIFT_SKIPPED = {
+    resource_changes: [],
+    resource_drift: [
+      { address: 'aws_instance.noop', change: { actions: ['no-op'], before: {}, after: {} } },
+      { address: 'aws_instance.read', change: { actions: ['read'], before: null, after: {} } },
+    ],
+  }
+  const DRIFT_BOTH = {
+    resource_changes: [{ address: 'aws_instance.new', change: { actions: ['create'], before: null, after: {} } }],
+    resource_drift: [{ address: 'aws_instance.gone', change: { actions: ['delete'], before: {}, after: null } }],
+  }
+  const DRIFT_MARKERS = ['drift_added', 'drift_changed', 'drift_destroyed', 'drift_summary']
+
+  const driftOnly = await postedFor(planWith('drift-only', DRIFT_ONLY))
+  check(
+    'resource_drift is summarized on the parallel drift_* fields',
+    driftOnly.posted?.drift_added === 0 &&
+      driftOnly.posted?.drift_changed === 1 &&
+      driftOnly.posted?.drift_destroyed === 0 &&
+      Array.isArray(driftOnly.posted?.drift_summary) &&
+      driftOnly.posted.drift_summary.length === 1,
+    JSON.stringify(driftOnly.posted),
+  )
+  check(
+    'an infra-only drift plan carries no unapplied config changes',
+    driftOnly.posted?.added === 0 &&
+      driftOnly.posted?.changed === 0 &&
+      driftOnly.posted?.destroyed === 0 &&
+      driftOnly.posted?.drifted === false,
+    JSON.stringify(driftOnly.posted),
+  )
+
+  const driftSkipped = await postedFor(planWith('drift-skipped', DRIFT_SKIPPED))
+  check(
+    'resource_drift honors the same skip rules as resource_changes',
+    driftSkipped.posted?.drift_added === 0 &&
+      driftSkipped.posted?.drift_changed === 0 &&
+      driftSkipped.posted?.drift_destroyed === 0 &&
+      JSON.stringify(driftSkipped.posted?.drift_summary) === '[]',
+    JSON.stringify(driftSkipped.posted),
+  )
+
+  const driftBoth = await postedFor(planWith('drift-both', DRIFT_BOTH))
+  check(
+    'resource_changes and resource_drift are counted independently when both are present',
+    driftBoth.posted?.added === 1 &&
+      driftBoth.posted?.drifted === true &&
+      driftBoth.posted?.drift_added === 0 &&
+      driftBoth.posted?.drift_destroyed === 1,
+    JSON.stringify(driftBoth.posted),
+  )
+  check(
+    'carries the drift_* wire names the backend will decode',
+    DRIFT_MARKERS.every((m) => m in (driftOnly.posted ?? {})),
+    JSON.stringify(Object.keys(driftOnly.posted ?? {})),
+  )
 }
 
 // ------------------------------------------------------- post entrypoint ----

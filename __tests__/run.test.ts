@@ -530,4 +530,64 @@ describe('run: the completeness markers reach the wire', () => {
     const posted = await runWith(UNMASKED)
     for (const marker of MARKERS) expect(Object.keys(posted)).toContain(marker)
   })
+
+  // Contract 1.4.0: `resource_drift` (infra drift, e.g. hand-edits) is
+  // summarized on parallel drift_added/drift_changed/drift_destroyed/
+  // drift_summary fields, alongside added/changed/destroyed/summary computed
+  // from resource_changes (unapplied config changes). src/index.ts added no
+  // logic for this — the body above is a spread of summarize()'s result — so
+  // these cases exist to prove the new fields actually reach the wire, not
+  // to exercise a new code path. Expected values are hardcoded rather than
+  // re-derived by calling summarize() here, so the assertions cannot pass by
+  // comparing the pinned contract against itself before the bump.
+  describe('run: infra-drift fields reach the wire (contract 1.4.0)', () => {
+    const DRIFT_MARKERS = ['drift_added', 'drift_changed', 'drift_destroyed', 'drift_summary'] as const
+
+    const DRIFT_ONLY = {
+      resource_changes: [],
+      resource_drift: [
+        { address: 'aws_instance.drifted', change: { actions: ['update'], before: { size: 1 }, after: { size: 2 } } },
+      ],
+    }
+    const DRIFT_SKIPPED = {
+      resource_changes: [],
+      resource_drift: [
+        { address: 'aws_instance.noop', change: { actions: ['no-op'], before: {}, after: {} } },
+        { address: 'aws_instance.read', change: { actions: ['read'], before: null, after: {} } },
+      ],
+    }
+    const DRIFT_BOTH = {
+      resource_changes: [{ address: 'aws_instance.new', change: { actions: ['create'], before: null, after: {} } }],
+      resource_drift: [{ address: 'aws_instance.gone', change: { actions: ['delete'], before: {}, after: null } }],
+    }
+
+    it('resource_drift is summarized on the parallel drift_* fields, independent of resource_changes', async () => {
+      const posted = await runWith(DRIFT_ONLY)
+      expect(posted.drift_added).toBe(0)
+      expect(posted.drift_changed).toBe(1)
+      expect(posted.drift_destroyed).toBe(0)
+      expect(Array.isArray(posted.drift_summary)).toBe(true)
+      expect((posted.drift_summary as unknown[]).length).toBe(1)
+      // An infra-only drift plan carries no unapplied config changes: the two
+      // axes must not bleed into each other.
+      expect([posted.added, posted.changed, posted.destroyed, posted.drifted]).toEqual([0, 0, 0, false])
+    })
+
+    it('resource_drift honors the same skip rules as resource_changes', async () => {
+      const posted = await runWith(DRIFT_SKIPPED)
+      expect([posted.drift_added, posted.drift_changed, posted.drift_destroyed]).toEqual([0, 0, 0])
+      expect(posted.drift_summary).toEqual([])
+    })
+
+    it('resource_changes and resource_drift are counted independently when both are present', async () => {
+      const posted = await runWith(DRIFT_BOTH)
+      expect([posted.added, posted.changed, posted.destroyed, posted.drifted]).toEqual([1, 0, 0, true])
+      expect([posted.drift_added, posted.drift_changed, posted.drift_destroyed]).toEqual([0, 0, 1])
+    })
+
+    it('carries the drift_* wire names the backend will decode', async () => {
+      const posted = await runWith(DRIFT_ONLY)
+      for (const marker of DRIFT_MARKERS) expect(Object.keys(posted)).toContain(marker)
+    })
+  })
 })
