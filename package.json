@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@4cloudguru/pipeline-task-core": "^0.9.3",
-    "@4cloudguru/terraform-drift-contract": "^1.4.0",
+    "@4cloudguru/terraform-drift-contract": "^1.4.1",
     "@actions/core": "^3.0.1",
     "undici": "^7.29.1"
   },
@@ -24,7 +24,7 @@
   },
   "devDependencies": {
     "@types/node": "^26",
-    "@vitest/coverage-v8": "^5.0.0",
+    "@vitest/coverage-v8": "^5.0.1",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
