@@ -590,4 +590,56 @@ describe('run: the completeness markers reach the wire', () => {
       for (const marker of DRIFT_MARKERS) expect(Object.keys(posted)).toContain(marker)
     })
   })
+
+  // Contract 1.4.2 (4cloudguru/terraform-drift-contract#107): a state carrying
+  // the SDK's unconfigured `timeouts` block as an object of nulls against a plan
+  // whose `after` has null is not a changed attribute. Hardcoded expectations
+  // again, so this fails against 1.4.1, where `timeouts` rides along.
+  describe('run: a value-free timeouts block stays off the wire (contract 1.4.2)', () => {
+    const TIMEOUTS = {
+      resource_changes: [
+        {
+          address: 'azurerm_subnet.app',
+          change: {
+            actions: ['update'],
+            before: {
+              private_link_service_network_policies_enabled: true,
+              timeouts: { create: null, delete: null, read: null, update: null },
+            },
+            after: { private_link_service_network_policies_enabled: false, timeouts: null },
+            before_sensitive: {},
+            after_sensitive: {},
+          },
+        },
+        {
+          address: 'azurerm_subnet.withValue',
+          change: {
+            actions: ['update'],
+            before: { timeouts: { create: '30m', delete: null, read: null, update: null } },
+            after: { timeouts: null },
+            before_sensitive: {},
+            after_sensitive: {},
+          },
+        },
+      ],
+    }
+
+    it('posts only the real change, and still posts a configured timeout', async () => {
+      const posted = await runWith(TIMEOUTS)
+      expect(posted.summary).toEqual([
+        {
+          address: 'azurerm_subnet.app',
+          actions: ['update'],
+          attrs: [{ name: 'private_link_service_network_policies_enabled', before: 'true', after: 'false' }],
+        },
+        {
+          address: 'azurerm_subnet.withValue',
+          actions: ['update'],
+          attrs: [{ name: 'timeouts', before: '{"create":"30m","delete":null,"read":null,"update":null}', after: null }],
+        },
+      ])
+      expect(reportBody().summary).toEqual(posted.summary)
+      expect([posted.changed, posted.drifted]).toEqual([2, true])
+    })
+  })
 })
