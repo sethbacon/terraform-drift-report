@@ -124,7 +124,7 @@ function runCleanup(state) {
 
 let failures = 0
 const check = (label, ok, detail) => {
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${ok ? '' : `\n        ${detail}`}`)
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${ok ? '' : `\n        detail: ${String(detail).replace(/\s+/g, ' ')}`}`)
   if (!ok) failures++
 }
 
