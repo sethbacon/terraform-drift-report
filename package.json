@@ -17,7 +17,7 @@
     "@4cloudguru/pipeline-task-core": "^0.9.3",
     "@4cloudguru/terraform-drift-contract": "^1.4.2",
     "@actions/core": "^3.0.1",
-    "undici": "^7.30.0"
+    "undici": "^7.30.1"
   },
   "overrides": {
     "undici": "$undici"
